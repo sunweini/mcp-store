@@ -7,11 +7,11 @@ get_zabbix: callable returning the ZabbixClient from app state.
 Deferred lookup (closure) because the client is initialized in the lifespan,
 not at import time.
 """
-from tools import problems, maintenance
+from tools import problems, maintenance, events
 
 
 def register_tools(mcp, get_zabbix) -> None:
     """Register all Zabbix tools on the FastMCP server instance."""
     problems.register(mcp, get_zabbix)
     maintenance.register(mcp, get_zabbix)
-    # events.register(mcp, get_zabbix)       # Task 5
+    events.register(mcp, get_zabbix)
