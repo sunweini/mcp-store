@@ -177,13 +177,16 @@ async def batch_acknowledge(
 # ── MCP registration ───────────────────────────────────────────────────────────
 
 
-def register(mcp: FastMCP, get_zabbix) -> None:
+def register(mcp: FastMCP, get_zabbix, metrics=None) -> None:
     """Register event tools on the FastMCP server.
 
     get_zabbix: callable returning the ZabbixClient from app state.
     Uses a closure to defer client lookup until tool invocation time —
     the client isn't available at import/registration time in stateless mode.
+
+    metrics: optional _metrics_wrapper factory from tools/__init__.py.
     """
+    _wrap = metrics or (lambda name: lambda f: f)
 
     async def _mcp_list_unacknowledged(
         severity: str | None = None,
@@ -201,7 +204,7 @@ def register(mcp: FastMCP, get_zabbix) -> None:
         name="list_unacknowledged",
         description=list_unacknowledged.__doc__,
         annotations=ToolAnnotations(readOnlyHint=True),
-    )(_mcp_list_unacknowledged)
+    )(_wrap("list_unacknowledged")(_mcp_list_unacknowledged))
 
     async def _mcp_acknowledge_event(
         event_id: str,
@@ -221,7 +224,7 @@ def register(mcp: FastMCP, get_zabbix) -> None:
         name="acknowledge_event",
         description=acknowledge_event.__doc__,
         annotations=ToolAnnotations(destructiveHint=True),
-    )(_mcp_acknowledge_event)
+    )(_wrap("acknowledge_event")(_mcp_acknowledge_event))
 
     async def _mcp_batch_acknowledge(
         event_ids: list[str],
@@ -241,4 +244,4 @@ def register(mcp: FastMCP, get_zabbix) -> None:
         name="batch_acknowledge",
         description=batch_acknowledge.__doc__,
         annotations=ToolAnnotations(destructiveHint=True),
-    )(_mcp_batch_acknowledge)
+    )(_wrap("batch_acknowledge")(_mcp_batch_acknowledge))

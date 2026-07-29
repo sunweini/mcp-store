@@ -241,13 +241,16 @@ async def problem_summary(
 # ── MCP registration ───────────────────────────────────────────────────────────
 
 
-def register(mcp: FastMCP, get_zabbix) -> None:
+def register(mcp: FastMCP, get_zabbix, metrics=None) -> None:
     """Register problem tools on the FastMCP server.
 
     get_zabbix: callable returning the ZabbixClient from app state.
     Uses a closure to defer client lookup until tool invocation time —
     the client isn't available at import/registration time in stateless mode.
+
+    metrics: optional _metrics_wrapper factory from tools/__init__.py.
     """
+    _wrap = metrics or (lambda name: lambda f: f)
 
     # Wrapper functions have a different Python name than the MCP tool name.
     # mcp.tool(name=...) sets the visible tool name for LLM clients.
@@ -273,7 +276,7 @@ def register(mcp: FastMCP, get_zabbix) -> None:
         name="list_active_problems",
         description=list_active_problems.__doc__,
         annotations=ToolAnnotations(readOnlyHint=True),
-    )(_mcp_list_active_problems)
+    )(_wrap("list_active_problems")(_mcp_list_active_problems))
 
     async def _mcp_problem_summary() -> dict:
         return await problem_summary(zabbix=get_zabbix())
@@ -284,4 +287,4 @@ def register(mcp: FastMCP, get_zabbix) -> None:
         name="problem_summary",
         description=problem_summary.__doc__,
         annotations=ToolAnnotations(readOnlyHint=True),
-    )(_mcp_problem_summary)
+    )(_wrap("problem_summary")(_mcp_problem_summary))

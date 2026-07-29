@@ -5,11 +5,14 @@ Every API call creates an OTel span for distributed tracing.
 Structured logging via structlog with trace context injection.
 """
 from typing import Any
+import time
 
 import httpx
 import structlog
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
+
+from telemetry import DEPENDENCY_DURATION, DEPENDENCY_ERRORS_TOTAL
 
 logger = structlog.get_logger()
 tracer = trace.get_tracer("zabbix_mcp.zabbix_client")
@@ -77,6 +80,8 @@ class ZabbixClient:
                 "auth": self._token,
             }
 
+            # Record dependency metrics
+            start_time = time.monotonic()
             try:
                 resp = await self._http.post(self._url, json=payload)
                 resp.raise_for_status()
@@ -84,9 +89,24 @@ class ZabbixClient:
 
                 span.set_attribute("http.status_code", resp.status_code)
 
+                # Record successful dependency duration
+                duration = time.monotonic() - start_time
+                if DEPENDENCY_DURATION:
+                    DEPENDENCY_DURATION.record(
+                        duration,
+                        attributes={"dependency": "zabbix_api", "operation": method},
+                    )
+
                 if "error" in data:
                     err = data["error"]
                     err_msg = err.get("message", str(err))
+
+                    # Record dependency error
+                    if DEPENDENCY_ERRORS_TOTAL:
+                        DEPENDENCY_ERRORS_TOTAL.add(
+                            1,
+                            attributes={"dependency": "zabbix_api", "error_type": "api_error"},
+                        )
 
                     # OBS-TRACE-002: record_exception + SetStatus 同时使用
                     span.set_status(Status(StatusCode.ERROR, err_msg))
@@ -111,6 +131,12 @@ class ZabbixClient:
                 raise
 
             except httpx.HTTPError as e:
+                # Record connection error
+                if DEPENDENCY_ERRORS_TOTAL:
+                    DEPENDENCY_ERRORS_TOTAL.add(
+                        1,
+                        attributes={"dependency": "zabbix_api", "error_type": "connection_error"},
+                    )
                 span.set_status(Status(StatusCode.ERROR, str(e)))
                 span.record_exception(e)
                 logger.error(

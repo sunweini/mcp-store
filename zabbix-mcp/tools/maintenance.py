@@ -243,13 +243,16 @@ async def delete_maintenance(
 # ── MCP registration ───────────────────────────────────────────────────────────
 
 
-def register(mcp: FastMCP, get_zabbix) -> None:
+def register(mcp: FastMCP, get_zabbix, metrics=None) -> None:
     """Register maintenance tools on the FastMCP server.
 
     get_zabbix: callable returning the ZabbixClient from app state.
     Uses a closure to defer client lookup until tool invocation time —
     the client isn't available at import/registration time in stateless mode.
+
+    metrics: optional _metrics_wrapper factory from tools/__init__.py.
     """
+    _wrap = metrics or (lambda name: lambda f: f)
 
     async def _mcp_create_maintenance(
         name: str,
@@ -283,7 +286,7 @@ def register(mcp: FastMCP, get_zabbix) -> None:
         name="create_maintenance",
         description=create_maintenance.__doc__,
         annotations=ToolAnnotations(destructiveHint=True),
-    )(_mcp_create_maintenance)
+    )(_wrap("create_maintenance")(_mcp_create_maintenance))
 
     async def _mcp_list_maintenances(active_only: bool = True) -> dict:
         return await list_maintenances(active_only=active_only, zabbix=get_zabbix())
@@ -294,7 +297,7 @@ def register(mcp: FastMCP, get_zabbix) -> None:
         name="list_maintenances",
         description=list_maintenances.__doc__,
         annotations=ToolAnnotations(readOnlyHint=True),
-    )(_mcp_list_maintenances)
+    )(_wrap("list_maintenances")(_mcp_list_maintenances))
 
     async def _mcp_delete_maintenance(maintenance_id: str) -> dict:
         return await delete_maintenance(maintenance_id=maintenance_id, zabbix=get_zabbix())
@@ -305,4 +308,4 @@ def register(mcp: FastMCP, get_zabbix) -> None:
         name="delete_maintenance",
         description=delete_maintenance.__doc__,
         annotations=ToolAnnotations(destructiveHint=True),
-    )(_mcp_delete_maintenance)
+    )(_wrap("delete_maintenance")(_mcp_delete_maintenance))

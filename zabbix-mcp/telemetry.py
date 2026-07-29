@@ -23,6 +23,15 @@ logger = structlog.get_logger()
 # Prometheus pulls this endpoint every scrape_interval (default 15s).
 PROMETHEUS_PORT = int(os.environ.get("PROMETHEUS_PORT", "9464"))
 
+# Module-level metric instruments — initialized by init_telemetry().
+# Before init, these are None; callers must guard with `if metric:`.
+REQUESTS_TOTAL = None
+REQUEST_DURATION = None
+ERRORS_TOTAL = None
+DEPENDENCY_DURATION = None
+DEPENDENCY_ERRORS_TOTAL = None
+IN_FLIGHT_REQUESTS = None
+
 
 def init_telemetry(service_name: str = "zabbix-mcp") -> None:
     """Initialize OTel TracerProvider + Metrics.
@@ -108,7 +117,6 @@ def _setup_metrics(resource: Resource, service_name: str) -> None:
             name="zabbix_mcp_request_duration_seconds",
             description="MCP tool call latency",
             unit="s",
-            # OBS-MET-003: custom buckets via OTel View (not inline)
         )
         ERRORS_TOTAL = meter.create_counter(
             name="zabbix_mcp_errors_total",
