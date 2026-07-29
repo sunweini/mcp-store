@@ -12,7 +12,7 @@ from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from zabbix_client import ZabbixClient, ZabbixAPIError, ZabbixConnectionError
-from tools.problems import _resolve_severity, _format_problem
+from tools.problems import _resolve_severity, _format_problem, _resolve_trigger_hosts
 
 logger = structlog.get_logger()
 
@@ -53,7 +53,7 @@ async def list_unacknowledged(
     params = {
         "output": "extend",
         "selectHosts": ["name"],
-        "sortfield": "clock",
+        "sortfield": "eventid",
         "sortorder": "DESC",
         "recent": True,
         # NOTE: acknowledged=False maps to Zabbix "0" — only unacknowledged events
@@ -74,7 +74,8 @@ async def list_unacknowledged(
         )
         return {"status": "error", "message": str(e)}
 
-    data = [_format_problem(p) for p in problems]
+    host_map = await _resolve_trigger_hosts(problems, zabbix)
+    data = [_format_problem(p, host_map) for p in problems]
     return {"status": "ok", "data": data, "count": len(data)}
 
 

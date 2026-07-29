@@ -108,10 +108,7 @@ def _setup_metrics(resource: Resource, service_name: str) -> None:
             name="zabbix_mcp_request_duration_seconds",
             description="MCP tool call latency",
             unit="s",
-            # OBS-MET-003: buckets aligned to Zabbix API SLO
-            explicit_bucket_boundaries=[
-                0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
-            ],
+            # OBS-MET-003: custom buckets via OTel View (not inline)
         )
         ERRORS_TOTAL = meter.create_counter(
             name="zabbix_mcp_errors_total",
@@ -122,9 +119,6 @@ def _setup_metrics(resource: Resource, service_name: str) -> None:
             name="zabbix_mcp_dependency_duration_seconds",
             description="Zabbix API call latency",
             unit="s",
-            explicit_bucket_boundaries=[
-                0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-            ],
         )
         DEPENDENCY_ERRORS_TOTAL = meter.create_counter(
             name="zabbix_mcp_dependency_errors_total",

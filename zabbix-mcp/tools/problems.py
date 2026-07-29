@@ -31,18 +31,59 @@ def _resolve_severity(name: str | None) -> int | None:
     return _SEVERITY_NAME_TO_INT.get(name.lower())
 
 
-def _format_problem(p: dict) -> dict:
+async def _resolve_trigger_hosts(
+    problems: list[dict], zabbix: ZabbixClient
+) -> dict[str, list[str]]:
+    """Batch-resolve host names for trigger-based problems via trigger.get.
+
+    Zabbix 6.4 problem.get returns hosts=None for trigger problems.
+    We resolve via trigger.get using the problem's objectid (= triggerid).
+
+    Returns: {triggerid: ["host1", "host2", ...], ...}
+    """
+    # Collect unique trigger IDs (objectid for source=0 problems)
+    trigger_ids = list({
+        p["objectid"] for p in problems
+        if p.get("source") == "0" and p.get("objectid")
+    })
+    if not trigger_ids:
+        return {}
+
+    try:
+        triggers = await zabbix.call(
+            "trigger.get",
+            {"triggerids": trigger_ids, "output": ["triggerid"], "selectHosts": ["name"]},
+        )
+    except (ZabbixAPIError, ZabbixConnectionError):
+        # Fallback: return empty map, host will show as "unknown"
+        return {}
+
+    return {
+        t["triggerid"]: [h["name"] for h in t.get("hosts", [])]
+        for t in triggers
+    }
+
+
+def _format_problem(p: dict, host_map: dict[str, list[str]] | None = None) -> dict:
     """Format a raw Zabbix problem object into the tool response schema.
 
-    Extracts the first host name (problems are per-trigger, not per-host,
-    but Zabbix attaches all hosts referenced by the trigger).
+    host_map: optional {triggerid: [host_names]} from _resolve_trigger_hosts.
+    Falls back to problem.get's hosts field, then "unknown".
     """
     sev_int = int(p.get("severity", 0))
-    hosts = p.get("hosts", [])
+    objectid = p.get("objectid", "")
+
+    # Resolve host name: host_map > problem hosts > "unknown"
+    host_name = "unknown"
+    if host_map and objectid in host_map and host_map[objectid]:
+        host_name = host_map[objectid][0]
+    elif p.get("hosts"):
+        host_name = p["hosts"][0]["name"]
+
     groups = p.get("groups", [])
     return {
         "event_id": p.get("eventid"),
-        "host": hosts[0]["name"] if hosts else "unknown",
+        "host": host_name,
         "description": p.get("name", ""),
         "severity": sev_int,
         "severity_name": SEVERITY_MAP.get(sev_int, "unknown"),
@@ -86,7 +127,7 @@ async def list_active_problems(
         "output": "extend",
         "selectHosts": ["name"],
         "selectGroups": ["name"],
-        "sortfield": "clock",
+        "sortfield": "eventid",
         "sortorder": "DESC",
         "recent": True,
         "limit": limit,
@@ -98,7 +139,6 @@ async def list_active_problems(
     try:
         problems = await zabbix.call("problem.get", params)
     except (ZabbixAPIError, ZabbixConnectionError) as e:
-        # OBS-LOG-001: structured key=value log on error path
         logger.error(
             "list_active_problems_zabbix_error",
             service="zabbix-mcp",
@@ -108,7 +148,9 @@ async def list_active_problems(
         )
         return {"status": "error", "message": str(e)}
 
-    data = [_format_problem(p) for p in problems]
+    # Resolve host names via trigger.get (problem.get doesn't return hosts for triggers)
+    host_map = await _resolve_trigger_hosts(problems, zabbix)
+    data = [_format_problem(p, host_map) for p in problems]
 
     # Client-side host name filter — Zabbix problem.get only accepts hostids,
     # not host names. Resolving name→id requires an extra host.get round-trip,
@@ -151,6 +193,9 @@ async def problem_summary(
         )
         return {"status": "error", "message": str(e)}
 
+    # Resolve host names via trigger.get for accurate top_hosts
+    host_map = await _resolve_trigger_hosts(problems, zabbix)
+
     # Single-pass aggregation — avoid iterating problems multiple times
     by_severity: dict[str, int] = {}
     by_host_group: dict[str, int] = {}
@@ -168,9 +213,15 @@ async def problem_summary(
             gname = g.get("name", "unknown")
             by_host_group[gname] = by_host_group.get(gname, 0) + 1
 
-        for h in p.get("hosts", []):
-            hname = h.get("name", "unknown")
-            host_counts[hname] = host_counts.get(hname, 0) + 1
+        # Use host_map for trigger-based problems
+        objectid = p.get("objectid", "")
+        if host_map and objectid in host_map and host_map[objectid]:
+            for hname in host_map[objectid]:
+                host_counts[hname] = host_counts.get(hname, 0) + 1
+        else:
+            for h in p.get("hosts", []) or []:
+                hname = h.get("name", "unknown")
+                host_counts[hname] = host_counts.get(hname, 0) + 1
 
     # Top 10 hosts by problem count — sorted descending
     top_hosts = sorted(host_counts.items(), key=lambda x: x[1], reverse=True)[:10]

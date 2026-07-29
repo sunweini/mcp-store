@@ -10,7 +10,6 @@ Observability:
 - Env: OTEL_EXPORTER_OTLP_ENDPOINT, LOG_FORMAT=json|console
 """
 import os
-from contextlib import asynccontextmanager
 
 import structlog
 from fastmcp import FastMCP
@@ -55,15 +54,38 @@ def _configure_logging() -> None:
     )
 
 
-# Process-level ZabbixClient, initialized during lifespan
+# Process-level ZabbixClient, initialized at module load time.
+# NOTE: In stateless mode, FastMCP v4 lifespan doesn't reliably trigger
+# on every request. Module-level init is simpler and works for single-process
+# deployments. Multi-process deployments should use shared storage.
 _zabbix_client = None
+
+
+def _init_zabbix_client():
+    """Initialize ZabbixClient from env vars. Called at module load."""
+    global _zabbix_client
+
+    if not ZABBIX_URL or not ZABBIX_TOKEN:
+        raise RuntimeError(
+            "ZABBIX_URL and ZABBIX_TOKEN environment variables are required"
+        )
+
+    from zabbix_client import ZabbixClient
+    _zabbix_client = ZabbixClient(
+        url=ZABBIX_URL, token=ZABBIX_TOKEN, timeout=ZABBIX_TIMEOUT
+    )
+
+    structlog.get_logger().info(
+        "zabbix_client_initialized",
+        service="zabbix-mcp",
+        zabbix_url=ZABBIX_URL,
+    )
 
 
 def _get_zabbix():
     """Return the process-level ZabbixClient.
 
-    Raises RuntimeError if called before lifespan has initialized the client —
-    this indicates a startup ordering bug, not a transient error.
+    Raises RuntimeError if env vars are missing — check ZABBIX_URL/ZABBIX_TOKEN.
     """
     if _zabbix_client is None:
         raise RuntimeError("ZabbixClient not initialized — check ZABBIX_URL/ZABBIX_TOKEN")
@@ -77,6 +99,9 @@ _configure_logging()
 from telemetry import init_telemetry
 init_telemetry()
 
+# Initialize ZabbixClient at module load (stateless mode doesn't trigger lifespan)
+_init_zabbix_client()
+
 mcp = FastMCP(
     "Zabbix MCP",
     instructions=(
@@ -88,37 +113,7 @@ mcp = FastMCP(
 )
 
 
-@asynccontextmanager
-async def lifespan(app):
-    """Initialize ZabbixClient on startup, close on shutdown."""
-    global _zabbix_client
-
-    from zabbix_client import ZabbixClient
-
-    if not ZABBIX_URL or not ZABBIX_TOKEN:
-        raise RuntimeError(
-            "ZABBIX_URL and ZABBIX_TOKEN environment variables are required"
-        )
-
-    _zabbix_client = ZabbixClient(
-        url=ZABBIX_URL, token=ZABBIX_TOKEN, timeout=ZABBIX_TIMEOUT
-    )
-
-    structlog.get_logger().info(
-        "zabbix_client_initialized",
-        service="zabbix-mcp",
-        zabbix_url=ZABBIX_URL,
-    )
-
-    yield
-
-    await _zabbix_client.close()
-    _zabbix_client = None
-    structlog.get_logger().info("zabbix_client_closed", service="zabbix-mcp")
-
-
-# Register all tools — deferred via _get_zabbix closure so tools access
-# the client initialized in lifespan without importing server state directly.
+# Register all tools — tools access the ZabbixClient via _get_zabbix closure.
 from tools import register_tools
 
 register_tools(mcp, _get_zabbix)
