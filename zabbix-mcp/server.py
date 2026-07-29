@@ -6,6 +6,8 @@ Uses API Token auth (no user.login session), compatible with stateless deploymen
 Observability:
 - Structured logging via structlog with OTel trace context injection
 - OpenTelemetry traces for all Zabbix API calls (see zabbix_client.py)
+- Prometheus metrics at /metrics (default port 9464)
+- Env: OTEL_EXPORTER_OTLP_ENDPOINT, LOG_FORMAT=json|console
 """
 import os
 from contextlib import asynccontextmanager
@@ -20,6 +22,7 @@ ZABBIX_TOKEN = os.environ.get("ZABBIX_TOKEN", "")
 ZABBIX_TIMEOUT = float(os.environ.get("ZABBIX_TIMEOUT", "30"))
 MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
 MCP_PORT = int(os.environ.get("MCP_PORT", "8000"))
+LOG_FORMAT = os.environ.get("LOG_FORMAT", "console")  # "console" or "json"
 
 
 def _configure_logging() -> None:
@@ -44,8 +47,10 @@ def _configure_logging() -> None:
             add_trace_context,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
-            structlog.dev.ConsoleRenderer(),
-            # NOTE: 生产环境换为 structlog.processors.JSONRenderer()
+            # OBS-CORE-001: JSON for production, console for dev
+            structlog.processors.JSONRenderer()
+            if LOG_FORMAT == "json"
+            else structlog.dev.ConsoleRenderer(),
         ],
     )
 
@@ -67,6 +72,10 @@ def _get_zabbix():
 
 # Configure logging before any log calls
 _configure_logging()
+
+# Initialize OTel traces + metrics (no-op if SDK not installed)
+from telemetry import init_telemetry
+init_telemetry()
 
 mcp = FastMCP(
     "Zabbix MCP",

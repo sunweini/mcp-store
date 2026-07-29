@@ -31,8 +31,35 @@ uv run pytest tests/ -v
 | `ZABBIX_URL` | 无（必填） | Zabbix API URL |
 | `ZABBIX_TOKEN` | 无（必填） | API Token |
 | `ZABBIX_TIMEOUT` | `30` | HTTP 超时秒数 |
-| `MCP_HOST` | `127.0.0.1` | 监听地址 |
-| `MCP_PORT` | `8000` | 监听端口 |
+| `MCP_HOST` | `127.0.0.1` | MCP server 监听地址 |
+| `MCP_PORT` | `8000` | MCP server 监听端口 |
+| `LOG_FORMAT` | `console` | `console`（开发）/ `json`（生产） |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | 无 | OTLP collector URL（如 `http://localhost:4317`） |
+| `OTEL_SERVICE_NAME` | `zabbix-mcp` | 服务名（trace/metrics label） |
+| `PROMETHEUS_PORT` | `9464` | Prometheus /metrics 端口 |
+| `FASTMCP_TELEMETRY_MODE` | `native` | `native` / `propagation_only` / `off` |
+
+## 可观测性
+
+### Traces
+- FastMCP 自动为每个 MCP 操作创建 span（`tools/call {name}` 等）
+- ZabbixClient 为每次 Zabbix API 调用创建 span（`zabbix_client.{method}`）
+- 设 `OTEL_EXPORTER_OTLP_ENDPOINT` 导出到 Jaeger/Tempo/OTLP collector
+- 不设则 console 输出（开发用）
+
+### Metrics（Prometheus）
+- `http://localhost:9464/metrics` 暴露 7 个核心指标
+- `zabbix_mcp_requests_total` — tool 调用总数
+- `zabbix_mcp_request_duration_seconds` — tool 调用延迟
+- `zabbix_mcp_errors_total` — tool 错误数
+- `zabbix_mcp_dependency_duration_seconds` — Zabbix API 延迟
+- `zabbix_mcp_dependency_errors_total` — Zabbix API 错误数
+- `zabbix_mcp_in_flight_requests` — 处理中请求数
+
+### Logs
+- structlog 结构化日志（key=value）
+- 每条日志自动注入 `trace_id` + `span_id`
+- `LOG_FORMAT=json` 切换 JSON 输出（Loki/ELK 友好）
 
 ## 知识库
 
