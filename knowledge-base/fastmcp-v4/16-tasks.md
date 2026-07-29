@@ -1,0 +1,358 @@
+> Source: https://gofastmcp.com/servers/tasks
+
+Extensibility
+# Background Tasks
+
+Copy pageCopy page
+
+Run long-running tools asynchronously with progress tracking
+
+Copy pageCopy page
+
+Background tasks require the `fastmcp-tasks` package. See [enabling background tasks](#enabling-background-tasks) below.
+FastMCP implements the MCP background tasks extension ([`io.modelcontextprotocol/tasks`](https://modelcontextprotocol.io/extensions/tasks/overview), SEP-2663), giving your servers a production-ready distributed task scheduler with one extension registration and a decorator change.
+
+**What is Docket?** FastMCP’s task system is powered by [Docket](https://github.com/chrisguidry/docket), originally built by [Prefect](https://prefect.io) to power [Prefect Cloud](https://www.prefect.io/prefect/cloud)’s managed task scheduling and execution service, where it processes millions of concurrent tasks every day. Docket is now open-sourced for the community.
+
+## [​
+
+](#what-are-mcp-background-tasks)What Are MCP Background Tasks?
+
+In MCP, a tool call is blocking by default. When a client calls a tool, it sends a request and waits for the response. For operations that take seconds or minutes, this creates a poor user experience.
+Background tasks solve this by letting a server tell a supporting client:
+
+- **Start** the tool and return a task ID immediately
+
+- **Poll** for status as the tool runs
+
+- **Retrieve** the result when ready — or answer a question the tool asks mid-run
+
+FastMCP handles all of this for you. Add `task=True` to a tool decorator and register the tasks extension, and your function gains background execution with progress reporting, distributed processing, and horizontal scaling.
+
+### [​
+
+](#mcp-background-tasks-vs-python-concurrency)MCP Background Tasks vs Python Concurrency
+
+You can always use Python’s concurrency primitives (asyncio, threads, multiprocessing) or external task queues in your FastMCP servers. FastMCP is just Python—run code however you like.
+MCP background tasks are different: they’re **protocol-native**. This means MCP clients that support the tasks extension can start a call, poll it, and retrieve its result through the standard MCP interface. The coordination happens at the protocol level, not inside your application code.
+
+## [​
+
+](#enabling-background-tasks)Enabling Background Tasks
+
+Background tasks require the `fastmcp-tasks` package:
+
+```
+pip install "fastmcp[tasks]"
+
+```
+
+Register `TasksExtension` on your server, then add `task=True` to a tool decorator. `task=True` marks the tool as *capable* of background execution; the extension is what actually runs it — a `task=True` tool on a server with no tasks extension registered raises at server startup.
+
+```
+import asyncio
+from fastmcp import FastMCP
+from fastmcp_tasks import TasksExtension
+
+mcp = FastMCP("MyServer")
+mcp.add_extension(TasksExtension())
+
+@mcp.tool(task=True)
+async def slow_computation(duration: int) -> str:
+    """A long-running operation."""
+    for i in range(duration):
+        await asyncio.sleep(1)
+    return f"Completed in {duration} seconds"
+
+```
+
+Whether a given call actually runs as a task depends on the client: it opts in per request, and the *server* decides based on the tool’s execution mode (below). When it does run as a task, the call returns immediately with a task ID; the work executes in a background worker, and the client polls for the result. A [FastMCP client](/clients/tasks) does all of this transparently — `client.call_tool(...)` looks the same either way.
+Background tasks are a modern-protocol feature: the tasks capability is negotiated over `2026-07-28` connections, so a client pinned to `mode="legacy"` never triggers one — the tool always runs synchronously for it.
+
+Background tasks require async functions. Attempting to use `task=True` with a sync function raises a `ValueError` at registration time. Only tools can be task-enabled; resources, resource templates, and prompts do not carry `task=`.
+
+## [​
+
+](#execution-modes)Execution Modes
+
+For fine-grained control over task execution behavior, use `TaskConfig` instead of the boolean shorthand. The tasks extension defines three execution modes:
+ |
+|  | Mode | Client calls without the tasks capability | Client calls with the tasks capability
+|  | `"forbidden"` | Executes synchronously | Executes synchronously (never tasked)
+|  | `"optional"` | Executes synchronously | Executes as a background task
+|  | `"required"` | Error: task required | Executes as a background task
+
+```
+from fastmcp import FastMCP
+from fastmcp.utilities.tasks import TaskConfig
+from fastmcp_tasks import TasksExtension
+
+mcp = FastMCP("MyServer")
+mcp.add_extension(TasksExtension())
+
+# Supports both sync and background execution (default when task=True)
+@mcp.tool(task=TaskConfig(mode="optional"))
+async def flexible_task() -> str:
+    return "Works either way"
+
+# Requires background execution - errors if the client didn't opt in
+@mcp.tool(task=TaskConfig(mode="required"))
+async def must_be_background() -> str:
+    return "Only runs as a background task"
+
+# No task support (default when task=False or omitted)
+@mcp.tool(task=TaskConfig(mode="forbidden"))
+async def sync_only() -> str:
+    return "Never runs as background task"
+
+```
+
+The boolean shortcuts map to these modes:
+
+- `task=True` → `TaskConfig(mode="optional")`
+
+- `task=False` → `TaskConfig(mode="forbidden")`
+
+When a `mode="required"` tool is called by a client that didn’t opt in, FastMCP returns a “missing required capability” error rather than running it synchronously.
+
+### [​
+
+](#poll-interval)Poll Interval
+
+When a client polls for task status, the server can suggest how frequently to check back:
+
+```
+from datetime import timedelta
+from fastmcp import FastMCP
+from fastmcp.utilities.tasks import TaskConfig
+from fastmcp_tasks import TasksExtension
+
+mcp = FastMCP("MyServer")
+mcp.add_extension(TasksExtension())
+
+# Poll every 2 seconds for a fast-completing task
+@mcp.tool(task=TaskConfig(mode="optional", poll_interval=timedelta(seconds=2)))
+async def quick_task() -> str:
+    return "Done quickly"
+
+# Poll every 30 seconds for a long-running task
+@mcp.tool(task=TaskConfig(mode="optional", poll_interval=timedelta(seconds=30)))
+async def slow_task() -> str:
+    return "Eventually done"
+
+```
+
+Shorter intervals give clients faster feedback but increase server load. The interval is a ceiling, not an exact cadence — the FastMCP client starts polling quickly and backs off toward it, so a fast task is still observed as done almost immediately.
+
+### [​
+
+](#server-wide-default)Server-Wide Default
+
+To enable background task support for all tools by default, pass `tasks=True` to the constructor. Individual decorators can still override this with `task=False`.
+
+```
+mcp = FastMCP("MyServer", tasks=True)
+
+```
+
+If your server defines any synchronous tools, you will need to explicitly set `task=False` on their decorators to avoid an error.
+
+### [​
+
+](#configuration)Configuration
+
+`TasksExtension` takes the backend configuration directly, with `FASTMCP_DOCKET_*` environment variables as defaults — so `TasksExtension()` works out of the box against an env-configured deployment:
+
+```
+mcp.add_extension(TasksExtension(url="redis://localhost:6379/0", concurrency=20))
+
+```
+
+ |
+|  | Environment Variable | Default | Description
+|  | `FASTMCP_DOCKET_URL` | `memory://` | Backend URL (`memory://` or `redis://host:port/db`)
+|  | `FASTMCP_DOCKET_NAME` | `fastmcp` | Queue name. Servers and workers sharing a name and URL share a queue.
+|  | `FASTMCP_DOCKET_CONCURRENCY` | `10` | Maximum concurrent tasks per worker.
+
+## [​
+
+](#backends)Backends
+
+FastMCP supports two backends for task execution, each with different tradeoffs.
+
+### [​
+
+](#in-memory-backend-default)In-Memory Backend (Default)
+
+The in-memory backend (`memory://`) requires zero configuration and works out of the box.
+**Advantages:**
+
+- No external dependencies
+
+- Simple single-process deployment
+
+**Disadvantages:**
+
+- **Ephemeral**: If the server restarts, all pending tasks are lost
+
+- **Higher latency**: ~250ms task pickup time vs single-digit milliseconds with Redis
+
+- **No horizontal scaling**: Single process only—you cannot add additional workers
+
+### [​
+
+](#redis-backend)Redis Backend
+
+For production deployments, use Redis (or Valkey) as your backend:
+
+```
+mcp.add_extension(TasksExtension(url="redis://localhost:6379/0"))
+
+```
+
+**Advantages:**
+
+- **Persistent**: Tasks survive server restarts
+
+- **Fast**: Single-digit millisecond task pickup latency
+
+- **Scalable**: Add workers to distribute load across processes or machines
+
+## [​
+
+](#workers)Workers
+
+Every FastMCP server with task-enabled tools automatically starts an **embedded worker**. You do not need to start a separate worker process for tasks to execute.
+To scale horizontally, add more workers:
+
+```
+python -m fastmcp_tasks.worker_cli worker server.py
+
+```
+
+Each additional worker pulls tasks from the same queue, distributing load across processes. Configure worker concurrency via environment:
+
+```
+export FASTMCP_DOCKET_CONCURRENCY=20
+python -m fastmcp_tasks.worker_cli worker server.py
+
+```
+
+Additional workers only work with Redis/Valkey backends. The in-memory backend is single-process only.
+
+Task-enabled tools must be defined at server startup to be registered with all workers. Tools added dynamically after the server starts will not be available for background execution.
+
+## [​
+
+](#gathering-input-mid-task)Gathering Input Mid-Task
+
+A tool can ask the client a question partway through — the same [guard pattern](/servers/elicitation#elicitation-on-the-modern-protocol) used for multi-round-trip input on foreground calls: instead of awaiting a response, the tool *returns* one, and FastMCP re-runs it once the client answers.
+
+```
+from fastmcp import Context, FastMCP
+from fastmcp_tasks import TasksExtension
+from mcp.types import (
+    ElicitRequest,
+    ElicitRequestFormParams,
+    ElicitResult,
+    InputRequiredResult,
+)
+
+mcp = FastMCP("MyServer")
+mcp.add_extension(TasksExtension())
+
+@mcp.tool(task=True)
+async def plan_dinner(ctx: Context) -> str | InputRequiredResult:
+    responses = ctx.input_responses
+    if responses is None:
+        # First leg: ask a question and end here.
+        request = ElicitRequest(
+            params=ElicitRequestFormParams(
+                message="What are you in the mood for?",
+                requested_schema={"type": "object", "properties": {"cuisine": {"type": "string"}}},
+            )
+        )
+        return InputRequiredResult(
+            result_type="input_required",
+            input_requests={"prefs": request},
+        )
+
+    # Re-entered leg: the client's answer is on ctx.input_responses.
+    answer = responses["prefs"]
+    assert isinstance(answer, ElicitResult)
+    return f"Tonight: {answer.content['cuisine']}!"
+
+```
+
+Run as a task, this “ends” the tool’s first leg entirely rather than blocking a worker on the client’s answer: the task reports `input_required`, the client answers, and FastMCP re-invokes the tool with the answer attached. No worker ever sits idle waiting on a round-trip — the same tool works identically whether it’s called synchronously or as a background task, and a [FastMCP client](/clients/tasks) answers the question automatically through its elicitation handler.
+
+Imperative `await ctx.elicit(...)` is not supported inside a background task — it would require blocking a worker for the length of a client round-trip. Use the guard pattern (return `InputRequiredResult`) instead; calling `ctx.elicit()` from a task-enabled tool raises with guidance toward the guard pattern.
+
+## [​
+
+](#progress-reporting)Progress Reporting
+
+The `Progress` dependency lets you report progress back to clients. Inject it as a parameter with a default value, and FastMCP will provide the active progress reporter.
+
+```
+from fastmcp import FastMCP
+from fastmcp.dependencies import Progress
+
+mcp = FastMCP("MyServer")
+
+@mcp.tool(task=True)
+async def process_files(files: list[str], progress: Progress = Progress()) -> str:
+    await progress.set_total(len(files))
+
+    for file in files:
+        await progress.set_message(f"Processing {file}")
+        # ... do work ...
+        await progress.increment()
+
+    return f"Processed {len(files)} files"
+
+```
+
+The progress API:
+
+- `await progress.set_total(n)` — Set the total number of steps
+
+- `await progress.increment(amount=1)` — Increment progress
+
+- `await progress.set_message(text)` — Update the status message
+
+Progress works in both immediate and background execution modes—you can use the same code regardless of how the client invokes your function.
+
+## [​
+
+](#docket-dependencies)Docket Dependencies
+
+FastMCP exposes Docket’s full dependency injection system within your task-enabled functions. Beyond `Progress`, you can access the Docket instance, worker information, and use advanced features like retries and timeouts.
+
+```
+from docket import Docket, Worker
+from fastmcp import FastMCP
+from fastmcp.dependencies import Progress
+from fastmcp_tasks.dependencies import CurrentDocket, CurrentWorker
+
+mcp = FastMCP("MyServer")
+
+@mcp.tool(task=True)
+async def my_task(
+    progress: Progress = Progress(),
+    docket: Docket = CurrentDocket(),
+    worker: Worker = CurrentWorker(),
+) -> str:
+    # Schedule additional background work
+    await docket.add(another_task, arg1, arg2)
+
+    # Access worker metadata
+    worker_name = worker.name
+
+    return "Done"
+
+```
+
+With `CurrentDocket()`, you can schedule additional background tasks, chain work together, and coordinate complex workflows. See the [Docket documentation](https://docket.lol/) for the complete API, including retry policies, timeouts, and custom dependencies.[Server Extensions
+Previous](/servers/extensions)[Versioning
+Next](/servers/versioning)⌘I
