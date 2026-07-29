@@ -24,6 +24,22 @@ mcp = FastMCP(
     ),
 )
 
+# NOTE: process-level ZabbixClient reference, initialized in lifespan.
+# Tools receive a callable (_get_zabbix) that reads this variable,
+# avoiding the need to thread app.state through the tool registration layer.
+_zabbix_client = None
+
+
+def _get_zabbix():
+    """Return the process-level ZabbixClient.
+
+    Raises RuntimeError if called before lifespan has initialized the client —
+    this indicates a startup ordering bug, not a transient error.
+    """
+    if _zabbix_client is None:
+        raise RuntimeError("ZabbixClient not initialized — lifespan has not run yet")
+    return _zabbix_client
+
 
 @asynccontextmanager
 async def lifespan(app):
@@ -31,20 +47,25 @@ async def lifespan(app):
     # not per-request, because httpx connection pool is expensive to create
     from zabbix_client import ZabbixClient
 
+    global _zabbix_client
+
     if not ZABBIX_URL or not ZABBIX_TOKEN:
         raise RuntimeError(
             "ZABBIX_URL and ZABBIX_TOKEN environment variables are required"
         )
-    app.state.zabbix = ZabbixClient(
+    _zabbix_client = ZabbixClient(
         url=ZABBIX_URL, token=ZABBIX_TOKEN, timeout=ZABBIX_TIMEOUT
     )
     yield
-    await app.state.zabbix.close()
+    await _zabbix_client.close()
+    _zabbix_client = None
 
 
-# Tools will be registered here by tools/__init__.py
-# from tools import register_tools
-# register_tools(mcp)
+# Tool registration — deferred via _get_zabbix closure so tools can access
+# the client initialized in lifespan without importing server state directly.
+from tools import register_tools
+
+register_tools(mcp, _get_zabbix)
 
 
 if __name__ == "__main__":
