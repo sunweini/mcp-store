@@ -1,0 +1,71 @@
+<!-- src/components/Sidebar.vue -->
+<template>
+  <aside class="sidebar">
+    <div class="side-brand">
+      <div class="brand-glyph">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="5" cy="12" r="2.4"/><circle cx="19" cy="5" r="2.4"/><circle cx="19" cy="19" r="2.4"/><path d="M7.3 11l9.4-4.9M7.3 13l9.4 4.9"/></svg>
+      </div>
+      <div class="brand-name" style="font-size:15px">Gateway</div>
+    </div>
+    <nav class="nav">
+      <button
+        v-for="p in navItems"
+        :key="p.id"
+        class="nav-item"
+        :class="{ active: page === p.id }"
+        @click="$emit('navigate', p.id)"
+      >
+        <span v-html="p.icon"></span>{{ p.label }}
+      </button>
+    </nav>
+    <div class="side-foot">
+      <div class="side-env">
+        <StatusLed status="ok" :pulse="true" /> production
+      </div>
+    </div>
+  </aside>
+</template>
+
+<script setup>
+import StatusLed from './StatusLed.vue'
+
+defineProps({
+  page: { type: String, default: 'dashboard' },
+})
+
+defineEmits(['navigate'])
+
+const navItems = [
+  { id: 'dashboard', label: '监控面板', icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 13l4-6 4 8 4-10 3 5h3"/></svg>' },
+  { id: 'servers', label: 'Servers', icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>' },
+  { id: 'tokens', label: 'Tokens', icon: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="8" cy="15" r="4.5"/><path d="M11.2 11.8L20 3M16 7l2.5 2.5M13.5 9.5L16 12"/></svg>' },
+]
+</script>
+
+<style scoped>
+/* ── Extracted from docs/superpowers/mockups/gateway-admin.html ── */
+.sidebar {
+  width: 216px; flex-shrink: 0; background: var(--ink-2);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; padding: 20px 12px;
+  position: sticky; top: 0; height: 100vh;
+}
+.side-brand { display: flex; align-items: center; gap: 10px; padding: 2px 8px 20px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.side-brand .brand-glyph { width: 32px; height: 32px; border-radius: 8px; }
+.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav-item {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  padding: 9px 12px; border-radius: 8px; border: none; background: transparent;
+  color: var(--muted); font-size: 13.5px; font-weight: 500; text-align: left;
+  position: relative; transition: background 0.15s, color 0.15s;
+}
+.nav-item:hover { background: var(--panel-2); color: var(--text); }
+.nav-item.active { background: var(--accent-dim); color: var(--accent); }
+.nav-item.active::before {
+  content: ""; position: absolute; left: -12px; top: 8px; bottom: 8px;
+  width: 3px; border-radius: 0 3px 3px 0; background: var(--accent);
+}
+.nav-item svg { flex-shrink: 0; }
+.side-foot { margin-top: auto; padding: 12px 10px 0; border-top: 1px solid var(--border); }
+.side-env { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 10.5px; color: var(--faint); letter-spacing: 0.05em; }
+</style>
