@@ -1,0 +1,46 @@
+/* ───────────────────────── Base Reset & Typography ───────────────────────── */
+/* Extracted from docs/superpowers/mockups/gateway-admin.html */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --font-display: "Space Grotesk", sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+}
+
+body {
+  font-family: var(--font-body);
+  background: var(--ink);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+  min-height: 100vh;
+  transition: background 0.25s ease, color 0.25s ease;
+}
+
+/* Subtle grid background */
+body::before {
+  content: "";
+  position: fixed; inset: 0;
+  pointer-events: none; z-index: 0;
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 34px 34px;
+  mask-image: radial-gradient(ellipse 120% 90% at 50% 0%, #000 30%, transparent 90%);
+}
+
+button { font-family: inherit; cursor: pointer; }
+input, select { font-family: inherit; }
+::selection { background: var(--accent-dim); }
+#app { position: relative; z-index: 1; }
+
+/* ───────────────────────── Utility classes ───────────────────────── */
+.mono { font-family: var(--font-mono); }
+.muted { color: var(--muted); }
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}

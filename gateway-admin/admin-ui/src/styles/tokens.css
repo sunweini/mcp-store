@@ -1,0 +1,51 @@
+/* ───────────────────────── Design Tokens ───────────────────────── */
+/* Extracted from docs/superpowers/mockups/gateway-admin.html */
+
+:root,
+:root[data-theme="dark"] {
+  --ink: #0b0f17;
+  --ink-2: #080b11;
+  --panel: #111726;
+  --panel-2: #0d1320;
+  --border: rgba(148, 163, 184, 0.12);
+  --border-strong: rgba(148, 163, 184, 0.24);
+  --text: #e7edf7;
+  --muted: #8b96ab;
+  --faint: #5b6678;
+  --accent: #2dd4bf;
+  --accent-dim: rgba(45, 212, 191, 0.12);
+  --accent-ink: #04241f;
+  --ok: #4ade80;
+  --ok-dim: rgba(74, 222, 128, 0.12);
+  --warn: #fbbf24;
+  --warn-dim: rgba(251, 191, 36, 0.12);
+  --err: #f87171;
+  --err-dim: rgba(248, 113, 113, 0.12);
+  --read: #60a5fa;
+  --shadow: 0 8px 30px rgba(2, 6, 17, 0.45);
+  --grid-line: rgba(148, 163, 184, 0.045);
+}
+
+:root[data-theme="light"] {
+  --ink: #f3f6fb;
+  --ink-2: #eaeef6;
+  --panel: #ffffff;
+  --panel-2: #f7f9fc;
+  --border: rgba(15, 30, 60, 0.1);
+  --border-strong: rgba(15, 30, 60, 0.2);
+  --text: #15202e;
+  --muted: #62718a;
+  --faint: #93a0b4;
+  --accent: #0d9488;
+  --accent-dim: rgba(13, 148, 136, 0.1);
+  --accent-ink: #ffffff;
+  --ok: #16a34a;
+  --ok-dim: rgba(22, 163, 74, 0.1);
+  --warn: #d97706;
+  --warn-dim: rgba(217, 119, 6, 0.1);
+  --err: #dc2626;
+  --err-dim: rgba(220, 38, 38, 0.08);
+  --read: #2563eb;
+  --shadow: 0 8px 26px rgba(20, 35, 60, 0.1);
+  --grid-line: rgba(15, 30, 60, 0.04);
+}
