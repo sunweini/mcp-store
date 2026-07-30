@@ -44,3 +44,166 @@ input, select { font-family: inherit; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
+
+/* ───────────────────────── Buttons ───────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  border-radius: 9px; border: 1px solid transparent;
+  font-weight: 600; font-size: 13.5px; padding: 10px 16px;
+  transition: transform 0.15s, background 0.18s, border-color 0.18s, box-shadow 0.18s, filter 0.18s;
+}
+.btn:active { transform: translateY(1px); }
+.btn-primary { background: var(--accent); color: var(--accent-ink); }
+.btn-primary:hover { filter: brightness(1.08); box-shadow: 0 4px 16px var(--accent-dim); }
+.btn-ghost { background: transparent; color: var(--muted); border-color: var(--border); }
+.btn-ghost:hover { color: var(--text); border-color: var(--border-strong); background: var(--panel-2); }
+.btn-block { width: 100%; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ───────────────────────── Form fields ───────────────────────── */
+.field { margin-bottom: 16px; }
+.field label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 7px; }
+.field input {
+  width: 100%; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 9px; padding: 10px 12px; color: var(--text); font-size: 14px;
+  transition: border-color 0.18s, box-shadow 0.18s;
+}
+.field input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.field input:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ───────────────────────── Table actions (search + add button row) ───────────────────────── */
+.table-actions { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; flex-wrap: wrap; }
+.search-input {
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 9px; padding: 8px 12px; color: var(--text);
+  font-size: 13px; width: 240px;
+  transition: border-color 0.18s, box-shadow 0.18s;
+}
+.search-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+
+/* ───────────────────────── Server cards (expandable) ───────────────────────── */
+.srv-list { display: flex; flex-direction: column; gap: 10px; }
+.srv-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; transition: border-color 0.15s; }
+.srv-card.open { border-color: var(--border-strong); }
+.srv-card-head { display: flex; align-items: center; gap: 18px; padding: 15px 18px; cursor: pointer; transition: background 0.15s; }
+.srv-card-head:hover { background: var(--panel-2); }
+.srv-id { display: flex; align-items: center; gap: 11px; flex: 1; min-width: 0; }
+.srv-id .cell-name { font-family: var(--font-mono); font-size: 14px; }
+.srv-desc { font-size: 11.5px; color: var(--muted); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srv-health { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.srv-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex-shrink: 0; width: 74px; }
+.expand-caret { border: none; background: transparent; color: var(--faint); font-size: 13px; transition: transform 0.2s; flex-shrink: 0; width: 20px; }
+.expand-caret.open { transform: rotate(180deg); color: var(--accent); }
+
+.srv-detail { border-top: 1px solid var(--border); padding: 16px 18px 18px; background: var(--panel-2); animation: detail-in 0.25s ease; }
+.srv-detail-meta { display: flex; flex-wrap: wrap; gap: 8px 24px; margin-bottom: 16px; padding-bottom: 14px; border-bottom: 1px dashed var(--border); }
+.srv-detail-meta .mk { font-family: var(--font-mono); font-size: 9px; color: var(--faint); letter-spacing: 0.1em; text-transform: uppercase; display: block; margin-bottom: 1px; }
+.srv-detail-meta .mv { font-size: 11.5px; color: var(--muted); }
+.tools-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+.tools-head span:first-child { font-family: var(--font-display); font-size: 12px; font-weight: 600; }
+.tools-head .hint { font-family: var(--font-mono); font-size: 10px; color: var(--faint); }
+.tool-row { display: flex; align-items: flex-start; gap: 11px; padding: 9px 10px; border-radius: 8px; transition: background 0.15s; }
+.tool-row:hover { background: var(--panel); }
+.mode-badge { width: 20px; height: 20px; border-radius: 5px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 10px; font-weight: 700; margin-top: 1px; }
+.mode-badge.read { background: color-mix(in srgb, var(--read) 14%, transparent); color: var(--read); }
+.mode-badge.write { background: var(--warn-dim); color: var(--warn); }
+.tool-info { min-width: 0; flex: 1; }
+.tool-name { font-size: 12.5px; font-weight: 500; }
+.tool-desc { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
+.srv-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--border); }
+
+/* ───────────────────────── Tables (tokens page etc) ───────────────────────── */
+.tbl { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.tbl th {
+  font-family: var(--font-mono); font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--faint); text-align: left;
+  padding: 12px 16px; background: var(--panel-2);
+  border-bottom: 1px solid var(--border); font-weight: 500;
+}
+.tbl td { padding: 13px 16px; border-bottom: 1px solid var(--border); font-size: 13.5px; vertical-align: middle; }
+.tbl tr:last-child td { border-bottom: none; }
+.tbl tbody tr { transition: background 0.15s; }
+.tbl tbody tr:hover { background: var(--panel-2); }
+.cell-name { font-weight: 600; }
+.cell-url { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); }
+
+/* ───────────────────────── Status chips ───────────────────────── */
+.status-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; padding: 3px 11px 3px 9px;
+  border-radius: 999px; border: 1px solid transparent;
+}
+.status-chip.ok { color: var(--ok); background: var(--ok-dim); }
+.status-chip.warn { color: var(--warn); background: var(--warn-dim); }
+.status-chip.err { color: var(--err); background: var(--err-dim); }
+
+/* ───────────────────────── Inline chips (permissions, etc) ───────────────────────── */
+.perm-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.perm-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-family: var(--font-mono); font-size: 10.5px;
+  padding: 3px 9px; border-radius: 7px;
+  background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+}
+.perm-chip .r { color: var(--read); font-weight: 600; }
+.perm-chip .w { color: var(--warn); font-weight: 600; }
+
+/* ───────────────────────── Row actions ───────────────────────── */
+.row-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.mini-btn {
+  border-radius: 7px; border: 1px solid var(--border); background: transparent;
+  color: var(--muted); font-size: 12px; padding: 5px 11px;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.mini-btn:hover { color: var(--text); border-color: var(--border-strong); background: var(--panel-2); }
+.mini-btn.danger { color: var(--err); border-color: color-mix(in srgb, var(--err) 30%, transparent); }
+.mini-btn.danger:hover { background: var(--err-dim); }
+
+/* ───────────────────────── Modal ───────────────────────── */
+.modal-mask {
+  position: fixed; inset: 0;
+  background: rgba(3, 7, 16, 0.55);
+  backdrop-filter: blur(3px);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 100; padding: 24px;
+  animation: fadein 0.18s ease;
+}
+:root[data-theme="light"] .modal-mask { background: rgba(20, 30, 50, 0.35); }
+@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+.modal {
+  width: 100%; max-width: 460px; background: var(--panel);
+  border: 1px solid var(--border-strong); border-radius: 14px;
+  box-shadow: var(--shadow);
+  animation: modal-up 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  overflow: hidden;
+}
+@keyframes modal-up { from { opacity: 0; transform: translateY(16px) scale(0.98); } to { opacity: 1; transform: none; } }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px 14px; border-bottom: 1px solid var(--border); }
+.modal-head h3 { font-family: var(--font-display); font-size: 15px; font-weight: 600; }
+.modal-body { padding: 20px 22px; }
+.modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 22px 18px; border-top: 1px solid var(--border); background: var(--panel-2); }
+
+/* ───────────────────────── Token permission blocks ───────────────────────── */
+.server-perm-block { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; background: var(--panel-2); }
+.server-perm-name { display: flex; align-items: center; gap: 9px; font-family: var(--font-mono); font-size: 12.5px; font-weight: 500; margin-bottom: 9px; }
+.perm-toggles { display: flex; gap: 18px; }
+.perm-toggle { display: flex; align-items: center; gap: 8px; font-size: 12.5px; cursor: pointer; user-select: none; }
+.perm-toggle input { display: none; }
+.switch { width: 34px; height: 19px; border-radius: 999px; background: var(--panel); border: 1px solid var(--border-strong); position: relative; transition: background 0.2s, border-color 0.2s; flex-shrink: 0; }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: var(--faint); transition: transform 0.2s cubic-bezier(0.22,1,0.36,1), background 0.2s; }
+.perm-toggle input:checked + .switch { background: var(--accent-dim); border-color: var(--accent); }
+.perm-toggle input:checked + .switch::after { transform: translateX(15px); background: var(--accent); }
+.perm-toggle.read .plabel { color: var(--read); }
+.perm-toggle.write .plabel { color: var(--warn); }
+
+/* ───────────────────────── Token reveal ───────────────────────── */
+.token-reveal { background: var(--panel-2); border: 1px dashed var(--accent); border-radius: 10px; padding: 13px 15px; font-family: var(--font-mono); font-size: 12px; color: var(--accent); word-break: break-all; margin-top: 4px; }
+
+/* ───────────────────────── Error banner (reused from Login) ───────────────────────── */
+.err-banner {
+  background: var(--err-dim); border: 1px solid color-mix(in srgb, var(--err) 35%, transparent);
+  color: var(--err); border-radius: 9px; padding: 9px 12px; font-size: 12.5px; margin-bottom: 16px;
+}
+
+/* ───────────────────────── detail-in animation ───────────────────────── */
+@keyframes detail-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
