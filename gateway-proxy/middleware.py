@@ -76,6 +76,11 @@ async def record_call_failure(
             break
         journey.append({"stage": st, "state": "ok", "ms": 0})
 
+    # Include the token name in the audit meta so the admin UI can show
+    # which credential was used (or "(anonymous)" for missing tokens).
+    # trace_id ties the audit record to the OTel span for cross-referencing.
+    token_name = token_info.get("name", "(anonymous)") if token_info else "(anonymous)"
+
     await record_failure(
         journey=journey,
         error_type=error_type,
@@ -86,6 +91,7 @@ async def record_call_failure(
             "op": op,
             "message": message,
             "latency_ms": latency_ms,
+            "token_name": token_name,
             "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         },
     )

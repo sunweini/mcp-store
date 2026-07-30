@@ -32,7 +32,7 @@ async def record_failure(
 
     journey: [{stage, state, ms}, ...] - state is ok|fail|skip
     error_type: one of ERROR_TYPES
-    meta: {trace_id, server, tool, op, message, latency_ms, time}
+    meta: {trace_id, server, tool, op, message, latency_ms, token_name, time}
     """
     r = get_redis()
     try:
@@ -46,6 +46,7 @@ async def record_failure(
                 "error_type": error_type,
                 "message": meta["message"],
                 "latency_ms": meta["latency_ms"],
+                "token_name": meta.get("token_name", ""),
                 "time": meta["time"],
                 "journey": json.dumps(journey),
             },
