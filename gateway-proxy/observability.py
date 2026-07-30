@@ -1,0 +1,60 @@
+"""OTel TracerProvider + Prometheus metrics.
+
+Mirrors the zabbix-mcp telemetry setup so the two services share a backend.
+Metrics use the OTel SDK with a Prometheus exporter (NOT prometheus_client
+directly), per the observability coding standard.
+"""
+import os
+import structlog
+from opentelemetry import metrics, trace
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+
+logger = structlog.get_logger()
+
+PROMETHEUS_PORT = int(os.environ.get("PROMETHEUS_PORT", "9464"))
+
+# Module-level instruments; None until init_telemetry() runs.
+REQUESTS_TOTAL = None
+REQUEST_LATENCY = None
+AUTH_FAILURES = None
+
+
+def init_telemetry(service_name: str = "mcp-gateway") -> None:
+    """Configure OTel traces + Prometheus metrics. Safe to call once at startup."""
+    global REQUESTS_TOTAL, REQUEST_LATENCY, AUTH_FAILURES
+
+    resource = Resource.create({
+        "service.name": os.environ.get("OTEL_SERVICE_NAME", service_name),
+    })
+
+    # ── Traces ───────────────────────────────────────────────────
+    otlp = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    if otlp:
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+        exporter = OTLPSpanExporter(endpoint=otlp)
+    else:
+        exporter = ConsoleSpanExporter()
+    provider = TracerProvider(resource=resource)
+    provider.add_span_processor(BatchSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+
+    # ── Metrics ──────────────────────────────────────────────────
+    try:
+        from opentelemetry.exporter.prometheus import PrometheusMetricReader
+        from prometheus_client import start_http_server
+
+        reader = PrometheusMetricReader()
+        metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))
+        start_http_server(PROMETHEUS_PORT)
+
+        meter = metrics.get_meter("mcp-gateway")
+        # NOTE: labels are bounded-cardinality (server/tool/operation/status)
+        REQUESTS_TOTAL = meter.create_counter("gateway_requests_total", description="Total MCP requests")
+        REQUEST_LATENCY = meter.create_histogram("gateway_request_duration_seconds", description="Request latency")
+        AUTH_FAILURES = meter.create_counter("gateway_auth_failures_total", description="Auth failures")
+        logger.info("metrics_configured", service=service_name, port=PROMETHEUS_PORT)
+    except ImportError:
+        logger.warning("prometheus_exporter_missing", service=service_name)
