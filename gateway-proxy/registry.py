@@ -5,6 +5,7 @@ subscribe to the 'server:changed' channel so the admin service can add/
 update/remove servers without restarting the proxy.
 """
 import json
+import re
 import time
 import structlog
 import httpx
@@ -14,6 +15,11 @@ from redis_client import get_redis
 from routing import register_tools, clear_tools
 
 logger = structlog.get_logger()
+
+# Server names are lower-case [a-z0-9-]+ so they are URL-safe and contain no
+# underscores - routing.split_prefix splits on the first underscore, so an
+# underscore in the namespace would break tool routing.
+_SERVER_NAME_RE = re.compile(r"^[a-z0-9-]+$")
 
 
 @dataclass
@@ -51,7 +57,10 @@ async def _introspect_tools(url: str) -> list[dict]:
                     "description": t.get("description", ""),
                 })
             return tools
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, json.JSONDecodeError, ValueError) as e:
+        # Why catch JSONDecodeError + ValueError: a backend may return HTML /
+        # plain text on error (e.g. 502 from a reverse proxy). Without this,
+        # a non-JSON body would crash watch_changes and kill hot-reload.
         logger.error("introspect_failed", url=url, error=str(e), service="gateway-proxy")
         return []
 
@@ -66,20 +75,43 @@ def parse_change_event(raw: str) -> tuple[str, str] | None:
 
 
 async def mount_all(gateway) -> None:
-    """Load every server in servers:active and mount it (startup)."""
+    """Load every server in servers:active and mount it (startup).
+
+    Mounts are serial on purpose: parallel mount would interleave introspection
+    logs and make startup order non-deterministic, which is hard to debug when
+    a single backend is misconfigured. Startup is not on the hot path.
+    """
     r = get_redis()
     names = await r.smembers("servers:active")
     for name in names:
         info = await r.hgetall(f"servers:{name}")
-        if info:
-            await _mount_one(gateway, name, info["url"])
+        if not info:
+            logger.warning("mount_all_skip", server=name, reason="no info hash", service="gateway-proxy")
+            continue
+        url = info.get("url")
+        if not url:
+            logger.warning("mount_all_skip", server=name, reason="missing url", service="gateway-proxy")
+            continue
+        await _mount_one(gateway, name, url)
 
 
 async def _mount_one(gateway, name: str, url: str) -> None:
     """Mount a single backend + introspect its tools into TOOL_REGISTRY."""
-    from fastmcp import create_proxy
+    # I5: reject names with underscores / uppercase so split_prefix keeps working.
+    if not _SERVER_NAME_RE.match(name):
+        logger.error(
+            "mount_skip_invalid_name",
+            server=name,
+            reason="name must match ^[a-z0-9-]+$",
+            service="gateway-proxy",
+        )
+        return
+    # C1: create_proxy lives in fastmcp.server, not the top-level fastmcp module.
+    from fastmcp.server import create_proxy
     try:
-        gateway.mount(create_proxy(url), name=name)
+        # C2: mount uses namespace= (not name=). name= is silently ignored and
+        # the proxy is mounted under the empty namespace, breaking routing.
+        gateway.mount(create_proxy(url), namespace=name)
     except Exception as e:
         logger.error("mount_failed", server=name, error=str(e), service="gateway-proxy")
         return
@@ -97,6 +129,10 @@ async def _unmount_one(gateway, name: str) -> None:
 
     A mounted server with namespace=N appears in gateway.providers as
     _WrappedProvider(..., transforms=[Namespace(N)]); Namespace exposes _prefix.
+
+    TODO: close client pool when FastMCP exposes a public unmount(). The proxy
+    client created by create_proxy() owns an httpx connection pool; dropping
+    the reference here does not explicitly close it, so connections rely on GC.
     """
     # Filter out the provider whose Namespace transform matches `name`.
     # LocalProvider (no transforms) and other namespaces are preserved.
@@ -136,13 +172,21 @@ async def watch_changes(gateway) -> None:
     async for msg in pubsub.listen():
         if msg.get("type") != "message":
             continue
-        parsed = parse_change_event(msg["data"])
-        if not parsed:
-            continue
-        action, name = parsed
-        info = await r.hgetall(f"servers:{name}")
-        if action in ("add", "update") and info:
-            await _unmount_one(gateway, name)
-            await _mount_one(gateway, name, info["url"])
-        elif action == "remove":
-            await _unmount_one(gateway, name)
+        # M1: isolate each event so one bad message can't kill hot-reload.
+        try:
+            parsed = parse_change_event(msg["data"])
+            if not parsed:
+                continue
+            action, name = parsed
+            info = await r.hgetall(f"servers:{name}")
+            if action in ("add", "update") and info:
+                url = info.get("url")
+                if not url:
+                    logger.warning("watch_changes_skip", server=name, reason="missing url", service="gateway-proxy")
+                    continue
+                await _unmount_one(gateway, name)
+                await _mount_one(gateway, name, url)
+            elif action == "remove":
+                await _unmount_one(gateway, name)
+        except Exception as e:
+            logger.error("watch_changes_event_failed", error=str(e), service="gateway-proxy")
