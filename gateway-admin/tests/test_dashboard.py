@@ -32,16 +32,53 @@ async def test_query_prometheus_empty(monkeypatch):
 
 
 def test_metrics_summary(client, fake_redis, auth_headers, monkeypatch):
-    # mock prometheus queries
+    # mock prometheus queries — use substring match since queries now include server labels
     import metrics
     async def fake_query(q):
-        return {"sum(gateway_requests_total)": 100, "sum(gateway_auth_failures_total)": 2}.get(q, 0)
+        if "gateway_requests_total" in q and "status!=" not in q and "operation=" not in q:
+            return 100  # requests (no error/op filter)
+        if "auth_failures" in q:
+            return 2
+        if "status!=" in q:
+            return 5    # errors
+        if "operation=\"read\"" in q:
+            return 60   # reads
+        if "operation=\"write\"" in q:
+            return 40   # writes
+        if "duration_seconds" in q:
+            return 0.05 # p95 = 50ms
+        return 0
     monkeypatch.setattr(metrics, "query_prometheus", fake_query)
     resp = client.get("/api/metrics/summary", headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()
     assert data["requests"] == 100
     assert data["auth_failures"] == 2
+    assert data["errors"] == 5
+    assert data["read"] == 60
+    assert data["write"] == 40
+    assert data["p95_ms"] == 50.0
+
+
+def test_metrics_summary_server_filter(client, fake_redis, auth_headers, monkeypatch):
+    """Server filter must propagate to ALL PromQL queries (errors, reads, writes, p95)."""
+    import metrics
+    captured: list[str] = []
+    async def fake_query(q):
+        captured.append(q)
+        return 1.0
+    monkeypatch.setattr(metrics, "query_prometheus", fake_query)
+    resp = client.get("/api/metrics/summary?server=zabbix", headers=auth_headers)
+    assert resp.status_code == 200
+
+    # Every query that touches gateway_requests_total or duration_seconds must carry server="zabbix"
+    for q in captured:
+        if "gateway_requests_total" in q or "duration_seconds" in q:
+            assert 'server="zabbix"' in q, f"server filter missing in query: {q}"
+
+    # auth_failures should NOT get a server filter (it has no server label)
+    auth_q = [q for q in captured if "auth_failures" in q][0]
+    assert 'server=' not in auth_q, f"auth_failures should not be server-filtered: {auth_q}"
 
 
 async def test_failures_from_stream(client, fake_redis, auth_headers):

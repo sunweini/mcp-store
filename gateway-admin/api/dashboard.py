@@ -17,14 +17,35 @@ router = APIRouter(prefix="/api", tags=["dashboard"])
 @router.get("/metrics/summary")
 async def metrics_summary(server: str | None = None, _: str = Depends(require_admin)):
     """Aggregated request/error/latency stats. Optional server filter."""
+    # Insert server="..." into any existing {...} PromQL label selector.
+    # e.g. _add('sum(m{op="read"})') -> 'sum(m{server="z",op="read"})' when server is set.
+    def _add(q: str) -> str:
+        if not server or "{" not in q:
+            return q
+        return q.replace("{", f'{{server="{server}",', 1)
+
     label = f'{{server="{server}"}}' if server else ""
     req_filter = f"gateway_requests_total{label}" if label else "gateway_requests_total"
     requests = await metrics.query_prometheus(f"sum({req_filter})")
-    errors = await metrics.query_prometheus(f"sum(gateway_requests_total{{status!='ok'}})")
+    errors = await metrics.query_prometheus(
+        _add("sum(gateway_requests_total{status!='ok'})")
+    )
     auth_failures = await metrics.query_prometheus("sum(gateway_auth_failures_total)")
-    p95 = await metrics.query_prometheus("histogram_quantile(0.95, sum by (le) (gateway_request_duration_seconds_bucket))")
-    reads = await metrics.query_prometheus('sum(gateway_requests_total{operation="read"})')
-    writes = await metrics.query_prometheus('sum(gateway_requests_total{operation="write"})')
+    # p95 has no existing {...}, so append label directly to the metric name
+    p95_metric = (
+        f'gateway_request_duration_seconds_bucket{{server="{server}"}}'
+        if server
+        else "gateway_request_duration_seconds_bucket"
+    )
+    p95 = await metrics.query_prometheus(
+        f"histogram_quantile(0.95, sum by (le) ({p95_metric}))"
+    )
+    reads = await metrics.query_prometheus(
+        _add('sum(gateway_requests_total{operation="read"})')
+    )
+    writes = await metrics.query_prometheus(
+        _add('sum(gateway_requests_total{operation="write"})')
+    )
     error_rate = round(errors / requests * 100, 2) if requests else 0.0
     return {
         "requests": int(requests),
