@@ -28,7 +28,7 @@ async def metrics_summary(server: str | None = None, _: str = Depends(require_ad
     req_filter = f"gateway_requests_total{label}" if label else "gateway_requests_total"
     requests = await metrics.query_prometheus(f"sum({req_filter})")
     errors = await metrics.query_prometheus(
-        _add("sum(gateway_requests_total{status!='ok'})")
+        _add('sum(gateway_requests_total{status="denied"})')
     )
     auth_failures = await metrics.query_prometheus("sum(gateway_auth_failures_total)")
     # p95 has no existing {...}, so append label directly to the metric name
@@ -66,7 +66,7 @@ async def metrics_by_server(_: str = Depends(require_admin)):
     out = []
     for name in names:
         reqs = await metrics.query_prometheus(f'sum(gateway_requests_total{{server="{name}"}})')
-        errs = await metrics.query_prometheus(f'sum(gateway_requests_total{{server="{name}",status!="ok"}})')
+        errs = await metrics.query_prometheus(f'sum(gateway_requests_total{{server="{name}",status="denied"}})')
         p95 = await metrics.query_prometheus(
             f'histogram_quantile(0.95, sum by (le) (gateway_request_duration_seconds_bucket{{server="{name}"}}))'
         )
