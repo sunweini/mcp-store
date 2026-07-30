@@ -11,6 +11,7 @@ from pydantic import BaseModel, field_validator
 
 from auth import require_admin
 from redis_client import get_redis
+from mcp_probe import probe, introspect_tools
 
 router = APIRouter(prefix="/api/servers", tags=["servers"])
 
@@ -102,3 +103,32 @@ async def delete_server(name: str, _: str = Depends(require_admin)):
     await r.srem("servers:active", name)
     await _publish_change("remove", name)
     return None
+
+
+@router.get("/{name}/status")
+async def server_status(name: str, _: str = Depends(require_admin)):
+    """Immediately probe a server and update its health in Redis."""
+    r = get_redis()
+    data = await r.hgetall(f"servers:{name}")
+    if not data:
+        raise HTTPException(status_code=404, detail="server not found")
+    result = await probe(data["url"])
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    await r.hset(f"servers:{name}", mapping={
+        "health_up": "1" if result.up else "0",
+        "health_latency_ms": str(result.latency_ms) if result.latency_ms is not None else "",
+        "last_health_check": now,
+    })
+    return {"up": result.up, "latency_ms": result.latency_ms, "checked": now}
+
+
+@router.post("/{name}/refresh-tools")
+async def refresh_tools(name: str, _: str = Depends(require_admin)):
+    """Re-introspect tools/list and store them in Redis."""
+    r = get_redis()
+    data = await r.hgetall(f"servers:{name}")
+    if not data:
+        raise HTTPException(status_code=404, detail="server not found")
+    tools = await introspect_tools(data["url"])
+    await r.hset(f"servers:{name}", "tools", json.dumps(tools))
+    return {"name": name, "tools": tools}
