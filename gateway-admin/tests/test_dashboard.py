@@ -10,24 +10,19 @@ def auth_headers():
 
 
 async def test_query_prometheus(monkeypatch):
-    import httpx
-    from metrics import query_prometheus
-    async def fake_get(self, url, params=None):
-        return httpx.Response(200, json={
-            "status": "success",
-            "data": {"result": [{"value": ["123", "42"]}]},
-        })
-    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    from metrics import query_prometheus, fetch_metrics
+    async def fake_fetch():
+        return {"gateway_requests_total": [({"status": "ok"}, 42.0)]}
+    monkeypatch.setattr("metrics.fetch_metrics", fake_fetch)
     val = await query_prometheus("sum(gateway_requests_total)")
     assert val == 42.0
 
 
 async def test_query_prometheus_empty(monkeypatch):
-    import httpx
     from metrics import query_prometheus
-    async def fake_get(self, url, params=None):
-        return httpx.Response(200, json={"status": "success", "data": {"result": []}})
-    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    async def fake_fetch():
+        return {}
+    monkeypatch.setattr("metrics.fetch_metrics", fake_fetch)
     assert await query_prometheus("anything") == 0.0
 
 
@@ -35,15 +30,15 @@ def test_metrics_summary(client, fake_redis, auth_headers, monkeypatch):
     # mock prometheus queries — use substring match since queries now include server labels
     import metrics
     async def fake_query(q):
-        if "gateway_requests_total" in q and "status!=" not in q and "operation=" not in q:
+        if "gateway_requests_total" in q and "denied" not in q and "operation=" not in q:
             return 100  # requests (no error/op filter)
         if "auth_failures" in q:
             return 2
-        if "status!=" in q:
-            return 5    # errors
-        if "operation=\"read\"" in q:
+        if "denied" in q:
+            return 5    # errors (status=denied)
+        if 'operation=\"read\"' in q:
             return 60   # reads
-        if "operation=\"write\"" in q:
+        if 'operation=\"write\"' in q:
             return 40   # writes
         if "duration_seconds" in q:
             return 0.05 # p95 = 50ms

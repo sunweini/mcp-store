@@ -153,7 +153,7 @@
                 :class="{sel: scope===s.server}" @click="setScope(s.server)">
               <td>
                 <span class="sname">
-                  <span class="led" :class="srvStatus(srvByName(s.server))"></span>
+                  <span class="led" :class="srvStatus(srvByName[s.server])"></span>
                   {{ s.server }}
                 </span>
               </td>

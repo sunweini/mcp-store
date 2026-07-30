@@ -89,7 +89,7 @@ async def test_middleware_allows_authorized_read(fake_redis, monkeypatch):
     # Mock get_http_headers to return our Bearer token.
     monkeypatch.setattr(
         "permission_middleware.get_http_headers",
-        lambda: {"authorization": "Bearer tok_read"},
+        lambda include=None: {"authorization": "Bearer tok_read"},
     )
 
     called = False
@@ -111,7 +111,7 @@ async def test_middleware_allows_authorized_read(fake_redis, monkeypatch):
 
 async def test_middleware_denies_missing_token(fake_redis, monkeypatch):
     """No Authorization header -> invalid_token -> ToolError."""
-    monkeypatch.setattr("permission_middleware.get_http_headers", lambda: {})
+    monkeypatch.setattr("permission_middleware.get_http_headers", lambda include=None: {})
 
     async def call_next(ctx):
         pytest.fail("call_next must not be reached when denied")
@@ -143,7 +143,7 @@ async def test_middleware_denies_wrong_permission(fake_redis, monkeypatch):
     )
     monkeypatch.setattr(
         "permission_middleware.get_http_headers",
-        lambda: {"authorization": "Bearer tok_ro"},
+        lambda include=None: {"authorization": "Bearer tok_ro"},
     )
 
     async def call_next(ctx):
@@ -173,7 +173,7 @@ async def test_middleware_verify_token_exception_treated_as_invalid(fake_redis, 
     monkeypatch.setattr("permission_middleware.verify_token", boom_verify)
     monkeypatch.setattr(
         "permission_middleware.get_http_headers",
-        lambda: {"authorization": "Bearer any_token"},
+        lambda include=None: {"authorization": "Bearer any_token"},
     )
 
     async def call_next(ctx):
@@ -206,7 +206,7 @@ async def test_middleware_records_backend_failure(fake_redis, monkeypatch):
     )
     monkeypatch.setattr(
         "permission_middleware.get_http_headers",
-        lambda: {"authorization": "Bearer tok_rw"},
+        lambda include=None: {"authorization": "Bearer tok_rw"},
     )
 
     import httpx
