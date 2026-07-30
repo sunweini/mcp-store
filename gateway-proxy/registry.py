@@ -43,11 +43,24 @@ async def _introspect_tools(url: str) -> list[dict]:
     """Call tools/list on a backend to learn each tool's mode + description.
 
     mode is 'write' if annotations.destructiveHint else 'read'.
+
+    NOTE: FastMCP servers return SSE format (event: message\ndata: {...}),
+    not plain JSON. Parse the data: line to extract the JSON-RPC response.
     """
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(url, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
-            data = resp.json()
+            text = resp.text
+            # FastMCP returns SSE: "event: message\ndata: {...}\n\n"
+            # Extract JSON from the data: line
+            data = None
+            for line in text.split("\n"):
+                if line.startswith("data: "):
+                    data = json.loads(line[6:])
+                    break
+            if data is None:
+                # Fallback: try plain JSON (non-FastMCP backends)
+                data = resp.json()
             tools = []
             for t in data.get("result", {}).get("tools", []):
                 ann = t.get("annotations") or {}

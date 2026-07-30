@@ -78,7 +78,9 @@ class PermissionMiddleware(Middleware):
         trace_id = _current_trace_id()
 
         # ── Extract + verify token ──────────────────────────────────
-        headers = get_http_headers()
+        # NOTE: get_http_headers() excludes 'authorization' by default.
+        # Must pass include={"authorization"} to get the Bearer token.
+        headers = get_http_headers(include={"authorization"})
         token = _extract_token(headers)
 
         # verify_token can raise KeyError/JSONDecodeError on malformed Redis
