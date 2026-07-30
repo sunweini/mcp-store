@@ -14,8 +14,12 @@ async def fake_redis(monkeypatch):
 
 
 @pytest.fixture
-def client():
-    """Synchronous FastAPI TestClient (uses anyio portal for async lifespan)."""
+def client(fake_redis):
+    """Synchronous FastAPI TestClient (uses anyio portal for async lifespan).
+
+    Depends on fake_redis so monkeypatch is applied before lifespan runs
+    ensure_default_admin() which calls get_redis().
+    """
     from app import app
     with TestClient(app) as c:
         yield c
