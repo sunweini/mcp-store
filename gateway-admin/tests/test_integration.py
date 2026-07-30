@@ -1,11 +1,4 @@
 """End-to-end flow: login -> register server -> create token -> list."""
-import pytest
-from auth import create_jwt
-
-
-@pytest.fixture
-def auth_headers():
-    return {"Authorization": f"Bearer {create_jwt('admin')}"}
 
 
 def test_full_flow(client, fake_redis):
@@ -41,5 +34,4 @@ def test_full_flow(client, fake_redis):
 
     # 6. delete server + token
     assert client.delete("/api/servers/zabbix", headers=headers).status_code == 204
-    assert client.delete(f"/api/tokens/{resp.json()[0]['id']}" if False else "/api/tokens/x",
-                         headers=headers).status_code in (204, 404)
+    assert client.delete(f"/api/tokens/{t['id']}", headers=headers).status_code == 204

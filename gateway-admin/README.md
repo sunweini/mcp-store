@@ -27,4 +27,4 @@ REDIS_URL=redis://localhost:6379/0 JWT_SECRET=your-secret \
 | GET | /api/failures | 失败请求列表 |
 
 ## 依赖
-gateway-proxy 共享 Redis。admin 写 servers/tokens，proxy 热加载。admin 读 Prometheus + audit Stream。
+与 gateway-proxy 共享 Redis。admin 写 servers/tokens，proxy 热加载。admin 读 Prometheus + audit Stream。
