@@ -56,5 +56,13 @@ def init_telemetry(service_name: str = "mcp-gateway") -> None:
         REQUEST_LATENCY = meter.create_histogram("gateway_request_duration_seconds", description="Request latency")
         AUTH_FAILURES = meter.create_counter("gateway_auth_failures_total", description="Auth failures")
         logger.info("metrics_configured", service=service_name, port=PROMETHEUS_PORT)
-    except ImportError:
-        logger.warning("prometheus_exporter_missing", service=service_name)
+    except Exception as exc:
+        # Catch OSError (port conflict on Linux/Docker) AND ImportError (missing
+        # optional deps). Mirrors zabbix-mcp/telemetry.py _start_prometheus_server:
+        # log a warning, never crash init_telemetry() -> server stays up.
+        logger.warning(
+            "metrics_init_failed",
+            service=service_name,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )

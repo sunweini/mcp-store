@@ -25,7 +25,11 @@ from opentelemetry import trace
 
 from auth import verify_token
 from middleware import check_call_permission, classify_error, record_call_failure
-from observability import REQUESTS_TOTAL, REQUEST_LATENCY, AUTH_FAILURES
+# CRITICAL: import the module (not `from observability import ...`) so that
+# attribute access resolves at CALL TIME, picking up the post-init_telemetry()
+# values. A `from` import snapshots the names at import time (all None, because
+# init_telemetry() hasn't run yet) and never sees the rebound instruments.
+import observability
 
 logger = structlog.get_logger()
 
@@ -109,12 +113,12 @@ class PermissionMiddleware(Middleware):
                 fail_stage="auth" if error_type == "invalid_token" else "route",
             )
             # Metrics: count the auth failure + record latency.
-            if AUTH_FAILURES:
-                AUTH_FAILURES.add(1, {"error_type": error_type})
-            if REQUESTS_TOTAL:
-                REQUESTS_TOTAL.add(1, {"status": "denied"})
-            if REQUEST_LATENCY:
-                REQUEST_LATENCY.record(latency_ms / 1000.0)
+            if observability.AUTH_FAILURES:
+                observability.AUTH_FAILURES.add(1, {"error_type": error_type})
+            if observability.REQUESTS_TOTAL:
+                observability.REQUESTS_TOTAL.add(1, {"status": "denied"})
+            if observability.REQUEST_LATENCY:
+                observability.REQUEST_LATENCY.record(latency_ms / 1000.0)
 
             raise ToolError(f"Permission denied: {error_type}")
 
@@ -133,16 +137,16 @@ class PermissionMiddleware(Middleware):
                 trace_id=trace_id,
                 fail_stage=tool_name.split("_", 1)[0] if "_" in tool_name else "backend",
             )
-            if REQUESTS_TOTAL:
-                REQUESTS_TOTAL.add(1, {"status": "error"})
-            if REQUEST_LATENCY:
-                REQUEST_LATENCY.record(latency_ms / 1000.0)
+            if observability.REQUESTS_TOTAL:
+                observability.REQUESTS_TOTAL.add(1, {"status": "error"})
+            if observability.REQUEST_LATENCY:
+                observability.REQUEST_LATENCY.record(latency_ms / 1000.0)
             raise
 
         latency_ms = int((time.monotonic() - start) * 1000)
-        if REQUESTS_TOTAL:
-            REQUESTS_TOTAL.add(1, {"status": "ok"})
-        if REQUEST_LATENCY:
-            REQUEST_LATENCY.record(latency_ms / 1000.0)
+        if observability.REQUESTS_TOTAL:
+            observability.REQUESTS_TOTAL.add(1, {"status": "ok"})
+        if observability.REQUEST_LATENCY:
+            observability.REQUEST_LATENCY.record(latency_ms / 1000.0)
 
         return result

@@ -30,7 +30,6 @@ structlog.configure(
 
 GATEWAY_PORT = int(os.environ.get("GATEWAY_PORT", "8080"))
 
-init_telemetry()
 logger = structlog.get_logger()
 
 
@@ -49,6 +48,10 @@ async def gateway_lifespan(server):
     the server's loop. The lifespan pattern is the FastMCP-blessed way to
     run startup code inside the server's event loop.
     """
+    # Initialize telemetry at server startup (not import time) so that:
+    # 1. Tests importing server.py don't trigger the Prometheus HTTP server.
+    # 2. The meter/tracer provider is ready before mount_all uses the modules.
+    init_telemetry()
     await mount_all(server)
     # Start the pubsub watcher as a fire-and-forget background task.
     # It runs for the lifetime of the server; we don't await it.

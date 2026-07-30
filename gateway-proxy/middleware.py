@@ -9,14 +9,11 @@ read from the Authorization header (parsed in server.py and stashed on the
 context); here we consume the already-verified token_info.
 """
 import time
-import structlog
 import httpx
 
-from auth import verify_token, check_permission
+from auth import check_permission
 from routing import resolve_target, UnknownServerError
 from audit import record_failure
-
-logger = structlog.get_logger()
 
 
 def check_call_permission(token_info: dict | None, mcp_name: str) -> tuple[bool, str | None]:
