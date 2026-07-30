@@ -7,7 +7,7 @@ import os
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -52,20 +52,6 @@ class LoginRequest(BaseModel):
     password: str
 
 
-async def require_admin(request: Request) -> str:
-    """FastAPI dependency: validate JWT from Authorization header.
-
-    Returns the admin subject (username) or raises 401.
-    """
-    auth = request.headers.get("authorization", "")
-    if not auth.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="missing bearer token")
-    sub = decode_jwt(auth[7:].strip())
-    if sub is None:
-        raise HTTPException(status_code=401, detail="invalid or expired token")
-    return sub
-
-
 @app.post("/api/login")
 async def login(req: LoginRequest):
     r = get_redis()
@@ -80,10 +66,10 @@ async def health():
     return {"status": "ok"}
 
 
-# Routers added in later tasks:
-# from api import servers, tokens, dashboard
-# app.include_router(servers.router)
-# ...
+# Routers
+from api import servers
+app.include_router(servers.router)
+# TODO: tokens, dashboard routers in later tasks
 
 # Serve Vue 3 SPA if dist exists (Plan C builds it)
 _dist = os.path.join(os.path.dirname(__file__), "admin-ui", "dist")

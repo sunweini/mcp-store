@@ -10,6 +10,7 @@ import time
 import bcrypt
 import jwt
 import structlog
+from fastapi import HTTPException, Request
 
 logger = structlog.get_logger()
 
@@ -55,6 +56,20 @@ def mask_token(token: str) -> str:
     if len(token) <= 8:
         return "****"
     return token[:8] + "****"
+
+
+async def require_admin(request: Request) -> str:
+    """FastAPI dependency: validate JWT from Authorization header.
+
+    Returns the admin subject (username) or raises 401.
+    """
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    sub = decode_jwt(auth[7:].strip())
+    if sub is None:
+        raise HTTPException(status_code=401, detail="invalid or expired token")
+    return sub
 
 
 async def ensure_default_admin() -> None:
