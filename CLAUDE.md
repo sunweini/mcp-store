@@ -12,6 +12,8 @@ mcpstore/
 │   └── fastmcp-v4/          # FastMCP v4 官方文档（38 篇）
 ├── templates/
 │   └── mcp-template/        # 新建 MCP 时复制此目录
+├── gateway-proxy/           # MCP 网关代理（FastMCP 4.0）
+├── gateway-admin/           # 网关管理界面（FastAPI + Vue 3）
 └── <mcp-name>/              # 每个 MCP 独立目录
     ├── CLAUDE.md            # MCP 级开发说明
     ├── README.md            # 功能说明（给用户看）
@@ -21,6 +23,67 @@ mcpstore/
     ├── pyproject.toml       # 依赖管理（uv）
     └── tests/               # 测试
 ```
+
+## 架构概览
+
+### MCP Gateway 架构
+
+```
+MCP Client → gateway-proxy:8080 → [zabbix-mcp:8000, github-mcp:8001, ...]
+                  ↑
+            gateway-admin:8081 (管理界面)
+                  ↑
+               Redis (共享存储)
+```
+
+**两个核心服务：**
+- `gateway-proxy`：MCP 协议代理，Token 验证，读写权限控制
+- `gateway-admin`：管理 API + Vue 3 前端（Server 管理、Token 管理、监控面板）
+
+### 接入 Gateway 流程
+
+开发新 MCP 时，需确保：
+
+1. **Server 命名与描述**
+   - name 用小写字母/数字/连字符，**禁止下划线**（namespace 前缀用 `_` 切分）
+   - 写清 server 描述 + 每个 tool 的 docstring（管理界面展示，配权限参考）
+   - 写操作 tool docstring 含 `⚠️ 写操作` 标记
+
+2. **Tool 标注 annotations**（读写分离）
+   ```python
+   @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+   def read_op(...): ...
+   
+   @mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+   def write_op(...): ...
+   ```
+   判定：`destructiveHint=True` → write，否则 read。漏标当 read。
+
+3. **健康探活** — MCP 标准 `ping`，FastMCP 原生支持，无需额外开发。Gateway 每 30s 探活。
+
+4. **在管理界面注册 MCP server**
+   - 访问 `http://localhost:8081`
+   - 添加 server：name + URL + description
+   - 注册时自动拉 `tools/list`（识别读/写）+ 自动探活
+
+5. **创建 API Token 并配置权限**
+   - 选择可访问的 MCP server
+   - 勾选 read/write 权限
+   - Token 明文只显示一次（存哈希）
+
+6. **MCP Client 连接配置**
+   ```json
+   {
+     "mcpServers": {
+       "gateway": {
+         "url": "http://localhost:8080/mcp",
+         "headers": {
+           "Authorization": "Bearer <token>"
+         }
+       }
+     }
+   }
+   ```
 
 ## 开发偏好
 
@@ -127,3 +190,19 @@ uv run python client.py   # 验证
 - W3C Trace Context 传播
 - JSON Schema 2020-12 output schema
 - `_meta` 必携带 `protocolVersion` + `clientInfo` + `clientCapabilities`
+
+## MCP 开发规范（Gateway-ready 强制项）
+
+每个 MCP 必须满足以下规范才能接入 Gateway。详细写法见 `templates/mcp-template/CLAUDE.md`。
+
+| 规范 | 要求 | 说明 |
+|---|---|---|
+| **Server 命名** | 小写字母/数字/连字符，禁下划线 | namespace 前缀用 `_` 切分，含下划线致路由歧义 |
+| **Server 描述** | 一句话说清能力 | 注册时填，管理界面展示 |
+| **Tool 描述** | docstring 写清用途 | Gateway 拉取展示，配权限参考 |
+| **读写分离** | 全部 tool 标 annotations | `destructiveHint=True` → write，否则 read |
+| **写操作标记** | docstring 含 `⚠️ 写操作` | AI 读到此标记走用户确认流程 |
+| **健康探活** | 支持 MCP `ping` | FastMCP 原生支持，无需额外开发 |
+| **可观测性** | structlog + OTel | 遵循 `~/.claude/docs/observability-coding-standards.md` |
+| **代码注释** | 写"为什么"不写"做了什么" | OBS-CORE-005 |
+
