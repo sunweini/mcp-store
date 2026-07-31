@@ -73,17 +73,20 @@ async def require_admin(request: Request) -> str:
 
 
 async def ensure_default_admin() -> None:
-    """Create a default admin:admin account if none exists.
+    """Create the default admin account if none exists.
 
-    NOTE: first-run bootstrap only. Change password immediately in prod.
+    Password from ADMIN_INIT_PASSWORD env (fallback admin123 for backward
+    compat with existing deployments). Idempotent: skips if admin:admin exists.
     """
     from redis_client import get_redis
     r = get_redis()
-    if not await r.exists("admin:admin"):
-        await r.hset("admin:admin", mapping={
-            "password_hash": hash_password("admin123"),
-            "role": "admin",
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        })
-        logger.warning("default_admin_created", service="gateway-admin",
-                       note="change password immediately")
+    if await r.exists("admin:admin"):
+        return
+    password = os.environ.get("ADMIN_INIT_PASSWORD", "admin123")
+    await r.hset("admin:admin", mapping={
+        "password_hash": hash_password(password),
+        "role": "admin",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+    logger.warning("default_admin_created", service="gateway-admin",
+                   note="change password immediately")
