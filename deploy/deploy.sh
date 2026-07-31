@@ -33,6 +33,9 @@ if grep -q "CHANGE_ME_generate" "$CONFIG_DIR/admin.env" 2>/dev/null; then
   sed -i.bak "s|CHANGE_ME_generate_with_openssl_rand_base64_32|$SECRET|" "$CONFIG_DIR/admin.env" && rm -f "$CONFIG_DIR/admin.env.bak"
   echo "  已生成 JWT_SECRET"
 fi
+# 拒绝占位符配置进入运行时:用户未编辑 .env 会带默认占位值启动,导致鉴权失效或连不上 Zabbix
+grep -q 'CHANGE_ME_strong_password\|your-api-token\|your-zabbix' "$CONFIG_DIR/admin.env" "$CONFIG_DIR/zabbix.env" 2>/dev/null && {
+  echo "ERROR: config 仍含占位符,请先编辑 config/*.env 填入真实值" >&2; exit 1; }
 echo "  ⚠️  请确认 config/zabbix.env 的 ZABBIX_URL/ZABBIX_TOKEN 已填,admin.env 的 ADMIN_INIT_PASSWORD 已改"
 
 # 所有服务镜像 FROM mcp-base,需先构建
@@ -43,10 +46,9 @@ docker build -t mcp-base:latest -f "$DEPLOY_DIR/Dockerfile.base" "$ROOT"
 echo "[4/6] build 服务镜像..."
 docker compose -f "$DEPLOY_DIR/docker-compose.yml" build
 
-# -d 后台启动,容器间通过 compose 网络互访
+# --wait 等 healthy(compose v2):有 healthcheck 的服务需通过才返回,无 healthcheck 视为 running 即 healthy
 echo "[5/6] 启动容器..."
-docker compose -f "$DEPLOY_DIR/docker-compose.yml" up -d
-sleep 3
+docker compose -f "$DEPLOY_DIR/docker-compose.yml" up -d --wait
 docker compose -f "$DEPLOY_DIR/docker-compose.yml" ps
 
 # 注册 zabbix-mcp 并创建 API token,失败则需人工排查

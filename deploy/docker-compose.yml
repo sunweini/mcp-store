@@ -58,6 +58,12 @@ services:
       - ./logs/admin:/app/logs
     networks: [mcp-net]
     depends_on: [redis, gateway-proxy]
+    # deploy.sh 用 `up -d --wait` 等 healthy;此 healthcheck 让 admin 就绪可被 init.sh 调用
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     restart: unless-stopped
 
   zabbix-mcp:

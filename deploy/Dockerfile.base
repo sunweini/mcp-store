@@ -10,8 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # uv(从官方镜像复制二进制,无需 install 脚本)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Node.js 20(给 gateway-admin 的 admin-ui 构建)
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+# Node.js 22 LTS(给 gateway-admin 的 admin-ui 构建;Node 20 已于 2026-04 EOL)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 

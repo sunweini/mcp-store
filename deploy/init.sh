@@ -14,6 +14,8 @@ TOK=$(curl -s -m5 -X POST "$ADMIN_HOST/api/login" \
   -H 'Content-Type: application/json' \
   -d "{\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\"}" \
   | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["token"] if "token" in d else d)')
+# JWT 以 eyJ 开头(header base64 解码为 {"alg":...);非此格式说明 login 失败(返回了 error dict)
+case "$TOK" in eyJ*) ;; *) echo "ERROR: login 失败: $TOK" >&2; exit 1 ;; esac
 echo "  token: ${TOK:0:20}..."
 
 echo "=== 注册 zabbix-mcp(若不存在)==="

@@ -14,5 +14,4 @@ RUN uv sync --frozen --no-dev
 # 源码
 COPY . ./
 
-ENV ADMIN_PORT=8081
 CMD ["uv", "run", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8081"]
