@@ -1,150 +1,67 @@
 #!/bin/bash
+# MCP Gateway 容器化一键部署
+# Usage: bash deploy.sh
 set -euo pipefail
 
-# MCP Gateway Deployment Script
-# Usage: sudo bash deploy.sh [REPO_URL]
+DEPLOY_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(dirname "$DEPLOY_DIR")"
+CONFIG_DIR="$DEPLOY_DIR/config"
+DATA_DIR="$DEPLOY_DIR/data"
+LOGS_DIR="$DEPLOY_DIR/logs"
 
-REPO_URL="${1:-https://github.com/sunweini/mcp-store.git}"
-INSTALL_DIR="/opt/mcp-gateway"
-CONFIG_DIR="/etc/mcp-gateway"
-SERVICE_USER="mcp"
+echo "=== MCP Gateway 容器化部署 ==="
+echo "  deploy dir: $DEPLOY_DIR"
 
-echo "=== MCP Gateway Deployment ==="
-echo "Target: $INSTALL_DIR"
-echo "Repo: $REPO_URL"
-echo ""
+# 1. 检查 docker
+echo "[1/6] 检查 docker..."
+command -v docker >/dev/null || { echo "ERROR: docker 未安装"; exit 1; }
+docker compose version >/dev/null 2>&1 || { echo "ERROR: docker compose v2 未安装"; exit 1; }
+echo "  docker: $(docker --version)"
 
-# 1. Check prerequisites
-echo "[1/8] Checking prerequisites..."
-for cmd in git python3 curl; do
-  command -v $cmd >/dev/null 2>&1 || { echo "ERROR: $cmd not found"; exit 1; }
-done
-
-# Install uv if not present
-if ! command -v uv >/dev/null 2>&1; then
-  echo "  Installing uv..."
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  export PATH="$HOME/.local/bin:$PATH"
-fi
-echo "  uv: $(uv --version)"
-
-# Check Redis
-if command -v redis-server >/dev/null 2>&1; then
-  echo "  Redis: $(redis-server --version)"
-elif command -v redis-cli >/dev/null 2>&1; then
-  echo "  Redis client found (server should be running)"
-else
-  echo "  WARNING: Redis not found. Installing..."
-  if command -v apt-get >/dev/null 2>&1; then
-    apt-get update -qq && apt-get install -y -qq redis-server
-  elif command -v yum >/dev/null 2>&1; then
-    yum install -y redis
-  else
-    echo "ERROR: Cannot install Redis automatically. Install manually."
-    exit 1
+# 2. 生成 config(从模板,若不存在)
+echo "[2/6] 检查 config..."
+mkdir -p "$CONFIG_DIR" "$DATA_DIR/redis" "$LOGS_DIR/proxy" "$LOGS_DIR/admin" "$LOGS_DIR/zabbix-mcp"
+for f in proxy.env admin.env zabbix.env; do
+  if [ ! -f "$CONFIG_DIR/$f" ]; then
+    cp "$CONFIG_DIR/$f.example" "$CONFIG_DIR/$f"
+    echo "  已从模板生成 $f - 请编辑填入真实值"
   fi
-  systemctl enable --now redis-server 2>/dev/null || systemctl enable --now redis 2>/dev/null || true
+done
+# 生成 JWT_SECRET(若 admin.env 仍是占位)
+if grep -q "CHANGE_ME_generate" "$CONFIG_DIR/admin.env" 2>/dev/null; then
+  SECRET=$(openssl rand -base64 32)
+  sed -i.bak "s|CHANGE_ME_generate_with_openssl_rand_base64_32|$SECRET|" "$CONFIG_DIR/admin.env" && rm -f "$CONFIG_DIR/admin.env.bak"
+  echo "  已生成 JWT_SECRET"
 fi
+echo "  ⚠️  请确认 config/zabbix.env 的 ZABBIX_URL/ZABBIX_TOKEN 已填,admin.env 的 ADMIN_INIT_PASSWORD 已改"
 
-# 2. Create service user
-echo "[2/8] Creating service user..."
-if ! id -u $SERVICE_USER >/dev/null 2>&1; then
-  useradd -r -s /usr/sbin/nologin -d $INSTALL_DIR $SERVICE_USER
-  echo "  Created user: $SERVICE_USER"
-else
-  echo "  User $SERVICE_USER exists"
-fi
+# 3. build 基础镜像
+echo "[3/6] build 基础镜像 mcp-base..."
+docker build -t mcp-base:latest -f "$DEPLOY_DIR/Dockerfile.base" "$ROOT"
 
-# 3. Clone/update repo
-echo "[3/8] Cloning repository..."
-if [ -d "$INSTALL_DIR/.git" ]; then
-  cd $INSTALL_DIR
-  git fetch --all
-  git reset --hard origin/main
-  echo "  Updated existing repo"
-else
-  git clone $REPO_URL $INSTALL_DIR
-  echo "  Cloned to $INSTALL_DIR"
-fi
-cd $INSTALL_DIR
+# 4. compose build
+echo "[4/6] build 服务镜像..."
+docker compose -f "$DEPLOY_DIR/docker-compose.yml" build
 
-# 4. Install Python dependencies
-echo "[4/8] Installing Python dependencies..."
-cd $INSTALL_DIR/gateway-proxy
-uv sync
-cd $INSTALL_DIR/gateway-admin
-uv sync
+# 5. 启动
+echo "[5/6] 启动容器..."
+docker compose -f "$DEPLOY_DIR/docker-compose.yml" up -d
+sleep 3
+docker compose -f "$DEPLOY_DIR/docker-compose.yml" ps
 
-# Build frontend
-echo "  Building frontend..."
-cd $INSTALL_DIR/gateway-admin/admin-ui
-npm install --production=false
-npm run build
-echo "  Frontend built to dist/"
-
-# 5. Set permissions
-echo "[5/8] Setting permissions..."
-chown -R $SERVICE_USER:$SERVICE_USER $INSTALL_DIR
-chmod -R 750 $INSTALL_DIR
-
-# 6. Install systemd services
-echo "[6/8] Installing systemd services..."
-cp $INSTALL_DIR/deploy/systemd/gateway-proxy.service /etc/systemd/system/
-cp $INSTALL_DIR/deploy/systemd/gateway-admin.service /etc/systemd/system/
-systemctl daemon-reload
-
-# 7. Create config directory + env files
-echo "[7/8] Creating config..."
-mkdir -p $CONFIG_DIR
-
-# Generate JWT secret if not exists
-if [ ! -f "$CONFIG_DIR/admin.env" ]; then
-  JWT_SECRET=$(openssl rand -base64 32)
-  cat > $CONFIG_DIR/admin.env << EOF
-JWT_SECRET=$JWT_SECRET
-JWT_EXPIRES=86400
-EOF
-  chmod 640 $CONFIG_DIR/admin.env
-  chown $SERVICE_USER:$SERVICE_USER $CONFIG_DIR/admin.env
-  echo "  Generated JWT_SECRET in $CONFIG_DIR/admin.env"
-else
-  echo "  Config exists, skipping"
-fi
-
-# Create proxy env if not exists
-if [ ! -f "$CONFIG_DIR/proxy.env" ]; then
-  cat > $CONFIG_DIR/proxy.env << EOF
-# Optional: set OTel collector endpoint
-# OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
-EOF
-  chmod 640 $CONFIG_DIR/proxy.env
-  chown $SERVICE_USER:$SERVICE_USER $CONFIG_DIR/proxy.env
-fi
-
-# 8. Start services
-echo "[8/8] Starting services..."
-systemctl enable gateway-proxy gateway-admin
-systemctl restart gateway-proxy
-sleep 2
-systemctl restart gateway-admin
-sleep 2
-
-# Verify
-echo ""
-echo "=== Verification ==="
-systemctl is-active gateway-proxy && echo "  gateway-proxy: OK" || echo "  gateway-proxy: FAILED"
-systemctl is-active gateway-admin && echo "  gateway-admin: OK" || echo "  gateway-admin: FAILED"
+# 6. 初始化(注册 zabbix-mcp + token)
+echo "[6/6] 初始化..."
+ADMIN_INIT_PASSWORD=$(grep '^ADMIN_INIT_PASSWORD=' "$CONFIG_DIR/admin.env" | cut -d= -f2-)
+ADMIN_PASS="${ADMIN_INIT_PASSWORD:-admin123}" bash "$DEPLOY_DIR/init.sh" || echo "  init 需手动跑: bash deploy/init.sh"
 
 echo ""
-echo "=== Access ==="
-echo "  Admin UI:  http://$(hostname -I | awk '{print $1}'):8081"
-echo "  Proxy:     http://$(hostname -I | awk '{print $1}'):8080/mcp"
-echo "  Metrics:   http://$(hostname -I | awk '{print $1}'):9465/metrics"
+echo "=== 部署完成 ==="
+echo "  Admin UI:  http://localhost:8081"
+echo "  Proxy:     http://localhost:8082/mcp"
+echo "  Metrics:   http://localhost:9465/metrics"
+echo "  日志:       $LOGS_DIR/{proxy,admin,zabbix-mcp}/"
+echo "  数据:       $DATA_DIR/redis/"
 echo ""
-echo "  Default admin: admin / admin123 (CHANGE IMMEDIATELY!)"
-echo ""
-echo "=== Logs ==="
-echo "  journalctl -u gateway-proxy -f"
-echo "  journalctl -u gateway-admin -f"
-echo ""
-echo "=== Deploy Complete ==="
+echo "  管理命令:"
+echo "    docker compose -f $DEPLOY_DIR/docker-compose.yml logs -f"
+echo "    docker compose -f $DEPLOY_DIR/docker-compose.yml restart gateway-proxy"
