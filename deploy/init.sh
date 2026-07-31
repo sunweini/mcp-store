@@ -1,6 +1,6 @@
 #!/bin/bash
-# 初始化 gateway:注册 zabbix-mcp + 创建 API token。幂等。
-# 在宿主上运行(非容器内),通过 localhost:8081 调 admin API。
+# 幂等初始化:首次部署或 admin 重置后运行,注册 zabbix-mcp + 建 token。
+# 在宿主上运行(非容器内),因为需要通过 localhost:8081 调 admin API。
 set -euo pipefail
 
 ADMIN_HOST="${ADMIN_HOST:-http://localhost:8081}"
@@ -18,7 +18,7 @@ echo "  token: ${TOK:0:20}..."
 
 echo "=== 注册 zabbix-mcp(若不存在)==="
 EXISTING=$(curl -s -m5 "$ADMIN_HOST/api/servers" -H "Authorization: Bearer $TOK" \
-  | python3 -c "import sys,json; print(any(s['name']=='zabbix-mcp' for s in json.load(sys.stdin)))")
+  | python3 -c "import sys,json; print(any(s['name']=='zabbix-mcp' for s in json.load(sys.stdin)))" 2>/dev/null || echo "False")
 if [ "$EXISTING" = "True" ]; then
   echo "  zabbix-mcp 已注册,跳过"
 else
@@ -32,19 +32,19 @@ fi
 echo "=== 刷新工具列表 ==="
 curl -s -m15 -X POST "$ADMIN_HOST/api/servers/zabbix-mcp/refresh-tools" \
   -H "Authorization: Bearer $TOK" \
-  | python3 -c 'import sys,json; d=json.load(sys.stdin); print(f"  tools: {len(d.get(\"tools\",[]))} 个")'
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  tools: %d 个" % len(d.get("tools",[])))'
 
 echo "=== 创建 API token(read+write)==="
 # 幂等:列出已有 token,同名跳过
 EXISTING_TOK=$(curl -s -m5 "$ADMIN_HOST/api/tokens" -H "Authorization: Bearer $TOK" \
-  | python3 -c "import sys,json; print(any(t.get('name')=='$TOKEN_NAME' for t in json.load(sys.stdin)))" 2>/dev/null || echo "False")
+  | TOKEN_NAME="$TOKEN_NAME" python3 -c "import sys,json,os; print(any(t.get('name')==os.environ['TOKEN_NAME'] for t in json.load(sys.stdin)))" 2>/dev/null || echo "False")
 if [ "$EXISTING_TOK" = "True" ]; then
   echo "  token '$TOKEN_NAME' 已存在(明文无法再取,如需新明文请删除后重建),跳过"
 else
   curl -s -m10 -X POST "$ADMIN_HOST/api/tokens" \
     -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
     -d "{\"name\":\"$TOKEN_NAME\",\"permissions\":{\"zabbix-mcp\":{\"read\":true,\"write\":true}}}" \
-    | python3 -c 'import sys,json; d=json.load(sys.stdin); print(f"  明文 token(只显示一次): {d.get(\"token\",\"?\")}")'
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  明文 token(只显示一次): %s" % d.get("token","?"))'
 fi
 
 echo ""

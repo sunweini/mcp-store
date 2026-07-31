@@ -12,15 +12,18 @@
 # 1. 克隆仓库
 git clone <repo-url> && cd mcpstore
 
-# 2. 一键部署(自动生成 config、build、启动、初始化)
-bash deploy/deploy.sh
-
-# 3. 首次部署前,编辑 config 填入真实凭据
+# 2. 从模板生成 config 并编辑填入真实凭据(deploy.sh 之前必须完成)
 #    - config/zabbix.env: ZABBIX_URL, ZABBIX_TOKEN
 #    - config/admin.env: ADMIN_INIT_PASSWORD
+cp deploy/config/zabbix.env.example deploy/config/zabbix.env
+cp deploy/config/admin.env.example deploy/config/admin.env
+cp deploy/config/proxy.env.example deploy/config/proxy.env
 vim deploy/config/*.env
 
-# 4. 重新初始化(注册 zabbix-mcp + 建 token)
+# 3. 一键部署(自动生成 JWT_SECRET、build、启动、初始化)
+bash deploy/deploy.sh
+
+# 4. 重新初始化(仅当 init 失败或需重建 token 时)
 bash deploy/init.sh
 ```
 

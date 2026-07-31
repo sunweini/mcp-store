@@ -12,13 +12,13 @@ LOGS_DIR="$DEPLOY_DIR/logs"
 echo "=== MCP Gateway 容器化部署 ==="
 echo "  deploy dir: $DEPLOY_DIR"
 
-# 1. 检查 docker
+# docker/compose v2 是容器运行前提(v1 已 EOL)
 echo "[1/6] 检查 docker..."
 command -v docker >/dev/null || { echo "ERROR: docker 未安装"; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "ERROR: docker compose v2 未安装"; exit 1; }
 echo "  docker: $(docker --version)"
 
-# 2. 生成 config(从模板,若不存在)
+# config 含密钥不进镜像,首次运行从 .example 模板生成
 echo "[2/6] 检查 config..."
 mkdir -p "$CONFIG_DIR" "$DATA_DIR/redis" "$LOGS_DIR/proxy" "$LOGS_DIR/admin" "$LOGS_DIR/zabbix-mcp"
 for f in proxy.env admin.env zabbix.env; do
@@ -27,7 +27,7 @@ for f in proxy.env admin.env zabbix.env; do
     echo "  已从模板生成 $f - 请编辑填入真实值"
   fi
 done
-# 生成 JWT_SECRET(若 admin.env 仍是占位)
+# 首次部署自动生成 JWT_SECRET,避免用户手动操作
 if grep -q "CHANGE_ME_generate" "$CONFIG_DIR/admin.env" 2>/dev/null; then
   SECRET=$(openssl rand -base64 32)
   sed -i.bak "s|CHANGE_ME_generate_with_openssl_rand_base64_32|$SECRET|" "$CONFIG_DIR/admin.env" && rm -f "$CONFIG_DIR/admin.env.bak"
@@ -35,24 +35,27 @@ if grep -q "CHANGE_ME_generate" "$CONFIG_DIR/admin.env" 2>/dev/null; then
 fi
 echo "  ⚠️  请确认 config/zabbix.env 的 ZABBIX_URL/ZABBIX_TOKEN 已填,admin.env 的 ADMIN_INIT_PASSWORD 已改"
 
-# 3. build 基础镜像
+# 所有服务镜像 FROM mcp-base,需先构建
 echo "[3/6] build 基础镜像 mcp-base..."
 docker build -t mcp-base:latest -f "$DEPLOY_DIR/Dockerfile.base" "$ROOT"
 
-# 4. compose build
+# 根据 compose 定义构建三个服务镜像
 echo "[4/6] build 服务镜像..."
 docker compose -f "$DEPLOY_DIR/docker-compose.yml" build
 
-# 5. 启动
+# -d 后台启动,容器间通过 compose 网络互访
 echo "[5/6] 启动容器..."
 docker compose -f "$DEPLOY_DIR/docker-compose.yml" up -d
 sleep 3
 docker compose -f "$DEPLOY_DIR/docker-compose.yml" ps
 
-# 6. 初始化(注册 zabbix-mcp + token)
+# 注册 zabbix-mcp 并创建 API token,失败则需人工排查
 echo "[6/6] 初始化..."
 ADMIN_INIT_PASSWORD=$(grep '^ADMIN_INIT_PASSWORD=' "$CONFIG_DIR/admin.env" | cut -d= -f2-)
-ADMIN_PASS="${ADMIN_INIT_PASSWORD:-admin123}" bash "$DEPLOY_DIR/init.sh" || echo "  init 需手动跑: bash deploy/init.sh"
+ADMIN_PASS="${ADMIN_INIT_PASSWORD:-admin123}" bash "$DEPLOY_DIR/init.sh" || {
+  echo "ERROR: init 失败,请检查 admin 是否就绪后重跑: bash deploy/init.sh" >&2
+  exit 1
+}
 
 echo ""
 echo "=== 部署完成 ==="
