@@ -1,0 +1,4 @@
+# 运行时产物,不提交(只保留 *.env.example 模板)
+config/*.env
+data/
+logs/

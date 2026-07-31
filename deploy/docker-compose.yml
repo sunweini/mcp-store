@@ -1,0 +1,81 @@
+# MCP Gateway 四容器编排
+# 用法: cd deploy && cp config/*.env.example config/*.env && 编辑真实值 && docker compose up -d
+#
+# 端口策略:
+#   - gateway-proxy 8082 -> 宿主 8082(避开 8080 本地开发端口)
+#   - gateway-proxy 9465 -> 宿主 9465(metrics,避开 9464 本地默认)
+#   - gateway-admin 8081 -> 宿主 8081
+#   - zabbix-mcp / redis 不映射宿主端口(仅容器内网互访,减少攻击面)
+#
+# 服务间互访: 用容器名 + 容器内端口(redis:6379, zabbix-mcp:8000, gateway-proxy:9465)
+#
+# 路径约定: build 上下文用 ../ 指向仓库根的源码目录;
+#           env_file / volumes 用 ./ 指向 deploy/ 内的运行时配置和数据
+
+services:
+  redis:
+    image: redis:7-alpine
+    # 60s 内至少 1 次 key 变化才触发 RDB 持久化;warning 级别减少日志噪声
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - ./data/redis:/data
+    networks: [mcp-net]
+    restart: unless-stopped
+
+  gateway-proxy:
+    build: ../gateway-proxy
+    ports:
+      - "8082:8082"
+      - "9465:9465"
+    env_file:
+      - ./config/proxy.env
+    environment:
+      # 容器名互访: redis 服务名即 DNS 名
+      REDIS_URL: redis://redis:6379/0
+      GATEWAY_PORT: "8082"
+      GATEWAY_HOST: "0.0.0.0"
+      PROMETHEUS_PORT: "9465"
+      # 日志写挂载卷,宿主可直接查看 ./logs/proxy/
+      LOG_FILE: /app/logs/gateway-proxy.log
+    volumes:
+      - ./logs/proxy:/app/logs
+    networks: [mcp-net]
+    depends_on: [redis]
+    restart: unless-stopped
+
+  gateway-admin:
+    build: ../gateway-admin
+    ports:
+      - "8081:8081"
+    env_file:
+      - ./config/admin.env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      # 容器名互访: admin 通过 proxy 的 metrics 端口拉取 Prometheus 数据
+      GATEWAY_PROXY_METRICS_URL: http://gateway-proxy:9465/metrics
+      LOG_FILE: /app/logs/gateway-admin.log
+    volumes:
+      - ./logs/admin:/app/logs
+    networks: [mcp-net]
+    depends_on: [redis, gateway-proxy]
+    restart: unless-stopped
+
+  zabbix-mcp:
+    build: ../zabbix-mcp
+    env_file:
+      - ./config/zabbix.env
+    environment:
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8000"
+      LOG_FORMAT: json
+      LOG_FILE: /app/logs/zabbix-mcp.log
+    volumes:
+      - ./logs/zabbix-mcp:/app/logs
+    networks: [mcp-net]
+    # zabbix-mcp 依赖 Redis 做 token 验证(proxy 转发请求时校验)
+    depends_on: [redis]
+    restart: unless-stopped
+
+networks:
+  mcp-net:
+    driver: bridge
