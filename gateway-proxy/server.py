@@ -19,14 +19,14 @@ from permission_middleware import PermissionMiddleware
 from redis_client import close_redis
 from registry import mount_all, watch_changes
 
-structlog.configure(
-    processors=[
-        structlog.contextvars.merge_contextvars,
-        structlog.processors.add_log_level,
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.JSONRenderer(),
-    ]
-)
+from logging_config import configure_logging
+
+configure_logging([
+    structlog.contextvars.merge_contextvars,
+    structlog.processors.add_log_level,
+    structlog.processors.TimeStamper(fmt="iso"),
+    structlog.processors.JSONRenderer(),
+])
 
 GATEWAY_PORT = int(os.environ.get("GATEWAY_PORT", "8080"))
 

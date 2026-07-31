@@ -15,13 +15,13 @@ from pydantic import BaseModel
 from auth import verify_password, create_jwt, decode_jwt, ensure_default_admin
 from redis_client import get_redis
 
-structlog.configure(
-    processors=[
-        structlog.processors.add_log_level,
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.JSONRenderer(),
-    ],
-)
+from logging_config import configure_logging
+
+configure_logging([
+    structlog.processors.add_log_level,
+    structlog.processors.TimeStamper(fmt="iso"),
+    structlog.processors.JSONRenderer(),
+])
 logger = structlog.get_logger()
 
 

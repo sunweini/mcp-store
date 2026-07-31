@@ -40,18 +40,16 @@ def _configure_logging() -> None:
             event_dict["span_id"] = format(sc.span_id, "016x")
         return event_dict
 
-    structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            add_trace_context,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            # OBS-CORE-001: JSON for production, console for dev
-            structlog.processors.JSONRenderer()
-            if LOG_FORMAT == "json"
-            else structlog.dev.ConsoleRenderer(),
-        ],
-    )
+    # OBS-CORE-001: delegate to shared helper so LOG_FILE env also works here
+    from logging_config import configure_logging
+    configure_logging([
+        structlog.contextvars.merge_contextvars,
+        add_trace_context,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer() if LOG_FORMAT == "json"
+        else structlog.dev.ConsoleRenderer(),
+    ])
 
 
 # Process-level ZabbixClient, initialized at module load time.
