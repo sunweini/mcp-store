@@ -26,9 +26,16 @@ Brave Search MCP server：多 key 池（Redis 驱动）自动轮换与故障转�
 
 ### 环境变量
 
-```bash
-export REDIS_URL="redis://localhost:6379/0"   # 必填
-```
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `REDIS_URL` | 无（必填） | Redis 连接（key 池存储 + 热更新 pubsub） |
+| `MCP_HOST` | `127.0.0.1` | 监听地址 |
+| `MCP_PORT` | `9051` | MCP 端口 |
+| `LOG_FORMAT` | `console` | `console`（开发）/ `json`（生产） |
+| `BRAVE_QUOTA_DEFAULT` | `2000` | 未设 monthly_quota 时默认月配额 |
+| `PROMETHEUS_PORT` | `9464` | Prometheus /metrics 端口（与 zabbix/tavily 同机部署会冲突，部署时需错开） |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | 无 | OTLP collector URL（未设则 console span） |
+| `OTEL_SERVICE_NAME` | `brave-mcp` | 服务名（trace/metrics label） |
 
 ### 从源码运行
 

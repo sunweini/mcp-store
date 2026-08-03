@@ -36,6 +36,14 @@ def classify_error(exc: Exception, status_code: int | None = None) -> ErrorKind 
         return ErrorKind.INVALID
     if status_code == 429:
         return ErrorKind.RATE_LIMIT
+    # Brave 对无效 token 实测返回 422（body detail 含 "The provided
+    # subscription token is invalid."，2026-08-03 冒烟实测）。但 422 同时
+    # 有参数错误语义（如非法 offset/count），只能按 body 文本精确匹配，
+    # 裸码匹配会把参数类 422 误剔有效 key（评审 I-1 裁决）
+    if status_code == 422:
+        detail = getattr(exc, "detail", "") or ""
+        if "subscription token is invalid" in detail.lower():
+            return ErrorKind.INVALID
     return None
 
 
@@ -44,6 +52,9 @@ class BraveError(Exception):
 
     def __init__(self, status_code: int, detail: str):
         self.status_code = status_code
+        # detail 单独存属性：classify_error 需按 body 文本区分 422 语义
+        # （invalid token vs 参数错误），仅靠 __str__ 拼接不可靠
+        self.detail = detail
         super().__init__(f"brave api error {status_code}: {detail}")
 
 

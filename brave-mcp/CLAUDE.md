@@ -41,15 +41,15 @@ KeyPool (Redis search:keys:brave + pubsub 热更新) ←───────┘
 |---|---|---|
 | 401 | INVALID | 永久剔除 |
 | 429 | RATE_LIMIT | 冷却 30s（Retry-After 可覆盖） |
+| 422 + body 含 "subscription token is invalid" | INVALID | 永久剔除（见下） |
 | 其余 4xx/5xx | EXHAUSTED | 标记不可用（Brave 无欠费 body 语义，全部归此） |
 | 网络/超时 | EXHAUSTED | 同上 |
 
 > **实测注意**：Brave 对无效 subscription token 返回 **422** 而非 401
 > （错误 body `detail: "The provided subscription token is invalid."`，
-> 2026-08-03 实测）。该 422 落入 EXHAUSTED 分类——功能上同样是永久剔除
-> （`exhausted` 状态不可自动恢复），但语义标签与 spec 的 401→INVALID
-> 不完全一致。若要 422+该 detail 映射 INVALID，改动点在
-> `brave_client.py::classify_error`（Task 4/5 统一评审时决策）。
+> 2026-08-03 实测）。`classify_error` 对该 422 按 body 文本精确匹配 →
+> INVALID（评审 I-1 裁决：**只匹配文本不匹配裸码**——422 还有参数错误
+> 语义，裸码匹配会误剔有效 key；其余 422 不映射，落 EXHAUSTED）。
 
 ## 配置
 

@@ -2,7 +2,7 @@
 import httpx
 import pytest
 
-from brave_client import BraveClient, classify_error
+from brave_client import BraveClient, BraveError, classify_error
 
 
 class MockTransport(httpx.AsyncBaseTransport):
@@ -29,18 +29,45 @@ async def test_web_search_success_and_auth_header():
 
 async def test_web_search_401_classified_invalid():
     client = BraveClient("BSA-test", transport=MockTransport({}, status_code=401))
-    with pytest.raises(Exception):
+    with pytest.raises(BraveError) as ei:
         await client.web_search({"q": "q"})
-    assert classify_error(Exception(), 401) == "invalid"
+    assert ei.value.status_code == 401
+    assert classify_error(ei.value) == "invalid"
     await client.close()
 
 
 async def test_web_search_429_classified_rate_limit():
     client = BraveClient("BSA-test", transport=MockTransport(
         {}, status_code=429, headers={"Retry-After": "30"}))
-    with pytest.raises(Exception):
+    with pytest.raises(BraveError) as ei:
         await client.web_search({"q": "q"})
-    assert classify_error(Exception(), 429) == "rate_limit"
+    assert ei.value.status_code == 429
+    assert classify_error(ei.value) == "rate_limit"
+    await client.close()
+
+
+async def test_web_search_422_invalid_token_classified_invalid():
+    # Brave 对无效 subscription token 实测返回 422 且 body detail 含
+    # "The provided subscription token is invalid."（I-1 裁决：只按
+    # body 文本匹配，不匹配裸码）。大小写不敏感匹配。
+    client = BraveClient("BSA-test", transport=MockTransport(
+        {"error": {"detail": "The provided subscription token is invalid."}},
+        status_code=422))
+    with pytest.raises(BraveError) as ei:
+        await client.web_search({"q": "q"})
+    assert ei.value.status_code == 422
+    assert classify_error(ei.value) == "invalid"
+    await client.close()
+
+
+async def test_web_search_422_other_detail_not_mapped():
+    # 422 还有参数错误语义（如非法 offset/count）——裸码匹配会误剔有效
+    # key，必须不映射（I-1 裁决）
+    client = BraveClient("BSA-test", transport=MockTransport(
+        {"error": {"detail": "Invalid value for offset"}}, status_code=422))
+    with pytest.raises(BraveError) as ei:
+        await client.web_search({"q": "q"})
+    assert classify_error(ei.value) is None
     await client.close()
 
 
