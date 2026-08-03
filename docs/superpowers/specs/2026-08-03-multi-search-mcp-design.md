@@ -54,7 +54,7 @@ search:keys:<provider>                  Hash — key 池
     "provider": "tavily",
     "enabled": true,
     "monthly_quota": 1000,        # 月配额上限，可改
-    "status": "active|invalid|exhausted|cooldown",
+    "status": "active|low_quota_warning|low_quota|invalid|exhausted|cooldown",
     "cooldown_until": null | ISO8601,
     "remaining": null | int,      # 官方剩余配额（tavily 有；brave/serpapi 靠本地计数）
     "last_used_at": null | ISO8601,
@@ -83,8 +83,9 @@ class KeyPool:
         """轮询选中:
         1. enabled=True 且 status != invalid
         2. cooldown 未过期的跳过
-        3. 多 key 时优先 remaining 高者（配额感知），tie 按配置顺序
-        4. 池空/全不可用 → None
+        3. low_quota（剩余<5%）跳过，仅当池内其余全不可用时兜底
+        4. 多 key 时优先 remaining 高者（配额感知），tie 按配置顺序
+        5. 池空/全不可用 → None
         """
 
     async def on_success(self, key_id: str, remaining: int | None = None):
@@ -113,6 +114,12 @@ class KeyPool:
 | serpapi | 响应体含 account limit 类错误 → EXHAUSTED；401 → INVALID | 429 → RATE_LIMIT |
 
 429 带 `Retry-After` 头则用之，否则默认 30s。
+
+### 低配额阈值（自动切换 + 告警）
+
+- **可用量 < 5%**：key 状态标 `low_quota`。KeyPool 正常轮询时**跳过**该 key；仅当池内其余 key 全不可用（invalid/cooldown/exhausted）时**兜底使用**，避免浪费剩余配额。
+- **可用量 < 10%**：状态标 `low_quota_warning`（仍正常参与轮询），前台告警提示。
+- 可用量计算：`remaining / monthly_quota`；`remaining` 无官方数据时（brave/serpapi）用 `monthly_quota - 本地当月计数`。
 
 ## 各源工具
 
@@ -184,6 +191,8 @@ GET    /api/search-keys/{provider}/usage        用量看板（本地计数 + ta
 gateway-admin 现有 Vue3 前端加 "API Keys" 菜单页：
 - 按源 tab 分组（tavily / brave / serpapi）
 - 表格：key 别名/状态/剩余配额/本月用量/最后使用/错误
+- **余额告警（<10%）**：key 行状态标红 + 显示剩余百分比与"低配额"标签；源 tab 显示告警计数角标（如 `tavily 2 低配额`）
+- **低配额（<5%）**：key 行标红显示"即将耗尽（兜底模式）"，角标同样计数
 - 操作：添加（自动探活）、启停、删除、改配额
 
 ## 部署
@@ -201,13 +210,14 @@ gateway-admin 现有 Vue3 前端加 "API Keys" 菜单页：
 - Prometheus 指标（每源 server）：
   - `search_requests_total{provider, engine, status}`（低基数：status 分 success/rate_limit/invalid/exhausted/timeout）
   - `search_quota_remaining{provider}`（可告警：配额耗尽 → 提示换 key）
+  - `search_quota_ratio{provider, level}`（level: warning<10% / critical<5% / exhausted=0，配合 alertmanager 告警）
   - `search_key_pool_size{provider}`、`search_key_invalid_total{provider}`
   - histogram `search_request_duration_seconds` 自定义 bucket 对齐 SLO（100ms/500ms/1s/3s/5s）
 - key_id / api key 本身**禁止**入 metric label 与日志（敏感，高基数）
 
 ## 测试
 
-- **KeyPool 单测**：轮询顺序、配额感知选择、cooldown 过期恢复、invalid/exhausted 剔除、热更新 reload、池空返回 None
+- **KeyPool 单测**：轮询顺序、配额感知选择、cooldown 过期恢复、invalid/exhausted 剔除、热更新 reload、池空返回 None、**low_quota 跳过与兜底**、**low_quota_warning 仍参与轮询**
 - **各源 client 单测**：httpx MockTransport 模拟成功/429/401/超时，验证错误映射与重试
 - **探活单测**：最小查询成功/失败
 - **工具层单测**：FastMCP tool 调用 → 正确参数透传
