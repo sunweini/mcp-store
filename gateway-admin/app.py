@@ -67,10 +67,11 @@ async def health():
 
 
 # Routers
-from api import servers, tokens, dashboard
+from api import servers, tokens, dashboard, keys
 app.include_router(servers.router)
 app.include_router(tokens.router)
 app.include_router(dashboard.router)
+app.include_router(keys.router)
 
 # Serve Vue 3 SPA if dist exists (Plan C builds it)
 _dist = os.path.join(os.path.dirname(__file__), "admin-ui", "dist")
