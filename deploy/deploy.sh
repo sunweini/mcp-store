@@ -20,7 +20,8 @@ echo "  docker: $(docker --version)"
 
 # config 含密钥不进镜像,首次运行从 .example 模板生成
 echo "[2/6] 检查 config..."
-mkdir -p "$CONFIG_DIR" "$DATA_DIR/redis" "$LOGS_DIR/proxy" "$LOGS_DIR/admin" "$LOGS_DIR/zabbix-mcp"
+mkdir -p "$CONFIG_DIR" "$DATA_DIR/redis" "$LOGS_DIR/proxy" "$LOGS_DIR/admin" "$LOGS_DIR/zabbix-mcp" \
+  "$LOGS_DIR/tavily-mcp" "$LOGS_DIR/brave-mcp" "$LOGS_DIR/serpapi-mcp"
 for f in proxy.env admin.env zabbix.env; do
   if [ ! -f "$CONFIG_DIR/$f" ]; then
     cp "$CONFIG_DIR/$f.example" "$CONFIG_DIR/$f"
@@ -42,7 +43,7 @@ echo "  ⚠️  请确认 config/zabbix.env 的 ZABBIX_URL/ZABBIX_TOKEN 已填,a
 echo "[3/6] build 基础镜像 mcp-base..."
 docker build -t mcp-base:latest -f "$DEPLOY_DIR/Dockerfile.base" "$ROOT"
 
-# 根据 compose 定义构建三个服务镜像
+# 根据 compose 定义构建四个服务镜像
 echo "[4/6] build 服务镜像..."
 docker compose -f "$DEPLOY_DIR/docker-compose.yml" build
 
@@ -64,7 +65,7 @@ echo "=== 部署完成 ==="
 echo "  Admin UI:  http://localhost:8081"
 echo "  Proxy:     http://localhost:8082/mcp"
 echo "  Metrics:   http://localhost:9465/metrics"
-echo "  日志:       $LOGS_DIR/{proxy,admin,zabbix-mcp}/"
+echo "  日志:       $LOGS_DIR/{proxy,admin,zabbix-mcp,tavily-mcp,brave-mcp,serpapi-mcp}/"
 echo "  数据:       $DATA_DIR/redis/"
 echo ""
 echo "  管理命令:"

@@ -6,7 +6,10 @@ set -euo pipefail
 ADMIN_HOST="${ADMIN_HOST:-http://localhost:8081}"
 ADMIN_USER="${ADMIN_USER:-admin}"
 ADMIN_PASS="${ADMIN_PASS:-${ADMIN_INIT_PASSWORD:-admin123}}"
-ZABBIX_MCP_URL="${ZABBIX_MCP_URL:-http://zabbix-mcp:8000/mcp}"
+# 服务间互访走容器名+容器内端口(proxy 从 Redis registry 读 URL,注册即生效)
+ZABBIX_MCP_URL="${ZABBIX_MCP_URL:-http://zabbix-mcp:9053/mcp}"
+# 搜索 MCP:name:port(容器内端口),key 从 Redis 读,无 env
+SEARCH_MCPS="tavily-mcp:9050 brave-mcp:9051 serpapi-mcp:9052"
 TOKEN_NAME="${TOKEN_NAME:-gateway-full}"
 
 echo "=== 登录 admin ==="
@@ -31,10 +34,35 @@ else
   echo "  已注册"
 fi
 
+echo "=== 注册搜索 MCP servers(若不存在)==="
+# admin API 无 GET /api/servers/{name} 单查路由,沿用上面的 list+python 判断模式做幂等
+# admin 在容器内可通过容器名访问搜索 MCP(compose 同一 mcp-net);本脚本在宿主运行,仅调 admin API
+for srv in $SEARCH_MCPS; do
+  name="${srv%%:*}"; port="${srv##*:}"
+  EXISTING=$(curl -s -m5 "$ADMIN_HOST/api/servers" -H "Authorization: Bearer $TOK" \
+    | python3 -c "import sys,json; print(any(s['name']=='$name' for s in json.load(sys.stdin)))" 2>/dev/null || echo "False")
+  if [ "$EXISTING" = "True" ]; then
+    echo "  $name 已注册,跳过"
+  else
+    # URL 用容器名+容器内端口,proxy 从 Redis 读此 URL 转发
+    curl -s -m10 -X POST "$ADMIN_HOST/api/servers" \
+      -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+      -d "{\"name\":\"$name\",\"url\":\"http://$name:$port/mcp\",\"description\":\"$name search MCP\"}" \
+      > /dev/null
+    echo "  已注册 $name -> http://$name:$port/mcp"
+  fi
+done
+
 echo "=== 刷新工具列表 ==="
 curl -s -m15 -X POST "$ADMIN_HOST/api/servers/zabbix-mcp/refresh-tools" \
   -H "Authorization: Bearer $TOK" \
-  | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  tools: %d 个" % len(d.get("tools",[])))'
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  zabbix-mcp tools: %d 个" % len(d.get("tools",[])))'
+for srv in $SEARCH_MCPS; do
+  name="${srv%%:*}"
+  curl -s -m15 -X POST "$ADMIN_HOST/api/servers/$name/refresh-tools" \
+    -H "Authorization: Bearer $TOK" \
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(\"  $name tools: %d 个\" % len(d.get(\"tools\",[])))"
+done
 
 echo "=== 创建 API token(read+write)==="
 # 幂等:列出已有 token,同名跳过
@@ -43,9 +71,10 @@ EXISTING_TOK=$(curl -s -m5 "$ADMIN_HOST/api/tokens" -H "Authorization: Bearer $T
 if [ "$EXISTING_TOK" = "True" ]; then
   echo "  token '$TOKEN_NAME' 已存在(明文无法再取,如需新明文请删除后重建),跳过"
 else
+  # 权限覆盖 4 个已注册 server;tokens API 校验引用的 server 必须已注册,故在注册之后创建
   curl -s -m10 -X POST "$ADMIN_HOST/api/tokens" \
     -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$TOKEN_NAME\",\"permissions\":{\"zabbix-mcp\":{\"read\":true,\"write\":true}}}" \
+    -d "{\"name\":\"$TOKEN_NAME\",\"permissions\":{\"zabbix-mcp\":{\"read\":true,\"write\":true},\"tavily-mcp\":{\"read\":true,\"write\":true},\"brave-mcp\":{\"read\":true,\"write\":true},\"serpapi-mcp\":{\"read\":true,\"write\":true}}}" \
     | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  明文 token(只显示一次): %s" % d.get("token","?"))'
 fi
 

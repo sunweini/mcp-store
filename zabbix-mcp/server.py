@@ -20,7 +20,7 @@ ZABBIX_URL = os.environ.get("ZABBIX_URL", "")
 ZABBIX_TOKEN = os.environ.get("ZABBIX_TOKEN", "")
 ZABBIX_TIMEOUT = float(os.environ.get("ZABBIX_TIMEOUT", "30"))
 MCP_HOST = os.environ.get("MCP_HOST", "127.0.0.1")
-MCP_PORT = int(os.environ.get("MCP_PORT", "8000"))
+MCP_PORT = int(os.environ.get("MCP_PORT", "9053"))
 LOG_FORMAT = os.environ.get("LOG_FORMAT", "console")  # "console" or "json"
 
 

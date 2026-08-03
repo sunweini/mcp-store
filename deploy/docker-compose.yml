@@ -7,7 +7,7 @@
 #   - gateway-admin 8081 -> 宿主 8081
 #   - zabbix-mcp / redis 不映射宿主端口(仅容器内网互访,减少攻击面)
 #
-# 服务间互访: 用容器名 + 容器内端口(redis:6379, zabbix-mcp:8000, gateway-proxy:9465)
+# 服务间互访: 用容器名 + 容器内端口(redis:6379, zabbix-mcp:9053, gateway-proxy:9465)
 #
 # 路径约定: build 上下文用 ../ 指向仓库根的源码目录;
 #           env_file / volumes 用 ./ 指向 deploy/ 内的运行时配置和数据
@@ -72,13 +72,60 @@ services:
       - ./config/zabbix.env
     environment:
       MCP_HOST: "0.0.0.0"
-      MCP_PORT: "8000"
+      MCP_PORT: "9053"
       LOG_FORMAT: json
       LOG_FILE: /app/logs/zabbix-mcp.log
     volumes:
       - ./logs/zabbix-mcp:/app/logs
     networks: [mcp-net]
     # zabbix-mcp 依赖 Redis 做 token 验证(proxy 转发请求时校验)
+    depends_on: [redis]
+    restart: unless-stopped
+
+  # 三个搜索 MCP:容器内端口 9050/9051/9052,不映射宿主
+  # 无 env_file / 无 key env——API key 由 gateway-admin 写入 Redis(keys.py),MCP 启动时从 KeyPool 读取
+  tavily-mcp:
+    build: ../tavily-mcp
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "9050"
+      LOG_FORMAT: json
+      LOG_FILE: /app/logs/tavily-mcp.log
+      TAVILY_QUOTA_DEFAULT: "1000"
+    volumes:
+      - ./logs/tavily-mcp:/app/logs
+    networks: [mcp-net]
+    depends_on: [redis]
+    restart: unless-stopped
+
+  brave-mcp:
+    build: ../brave-mcp
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "9051"
+      LOG_FORMAT: json
+      LOG_FILE: /app/logs/brave-mcp.log
+      BRAVE_QUOTA_DEFAULT: "2000"
+    volumes:
+      - ./logs/brave-mcp:/app/logs
+    networks: [mcp-net]
+    depends_on: [redis]
+    restart: unless-stopped
+
+  serpapi-mcp:
+    build: ../serpapi-mcp
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "9052"
+      LOG_FORMAT: json
+      LOG_FILE: /app/logs/serpapi-mcp.log
+      SERPAPI_QUOTA_DEFAULT: "100"
+    volumes:
+      - ./logs/serpapi-mcp:/app/logs
+    networks: [mcp-net]
     depends_on: [redis]
     restart: unless-stopped
 

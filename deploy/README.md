@@ -46,17 +46,27 @@ bash deploy/init.sh
 | `deploy/logs/proxy/` | `/app/logs` | gateway-proxy 日志 |
 | `deploy/logs/admin/` | `/app/logs` | gateway-admin 日志 |
 | `deploy/logs/zabbix-mcp/` | `/app/logs` | zabbix-mcp 日志 |
+| `deploy/logs/tavily-mcp/` | `/app/logs` | tavily-mcp 日志 |
+| `deploy/logs/brave-mcp/` | `/app/logs` | brave-mcp 日志 |
+| `deploy/logs/serpapi-mcp/` | `/app/logs` | serpapi-mcp 日志 |
 
 ## 架构
 
 ```
-:8082 -> gateway-proxy -> zabbix-mcp:8000 (内部)
+:8082 -> gateway-proxy -> zabbix-mcp:9053 (内部)
+                      -> tavily-mcp:9050 (内部)
+                      -> brave-mcp:9051  (内部)
+                      -> serpapi-mcp:9052(内部)
 :8081 -> gateway-admin (API + Vue UI)
 :9465 -> gateway-proxy metrics
 redis:6379 (内部,共享存储)
 ```
 
-服务间用容器名互访。zabbix-mcp、redis 不对外暴露。
+服务间用容器名互访。各 MCP、redis 不对外暴露。
+
+三个搜索 MCP 的 API key 不配环境变量——通过 admin 界面
+「API Keys」页写入 Redis（`search:keys:<provider>`），MCP 启动时从 KeyPool 读取。
+搜索 MCP 需先在 UI 配好 key，工具调用才能成功。
 
 ## 运维命令
 
