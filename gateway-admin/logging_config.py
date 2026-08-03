@@ -2,6 +2,12 @@
 
 OBS-CORE-001: structured key=value. LOG_FILE env enables a rotated file
 handler alongside stdout so container logs persist on the host volume.
+
+OBS: httpx 默认 INFO 级打印完整请求 URL——admin 探活 serpapi key 时
+query 带 api_key 明文（_probe_key），必须把 httpx logger 提到 WARNING
+（与三个搜索 MCP 的 logging_config 同防线；端到端实测抓到泄漏，见
+task-8-report）。zabbix/tavily/brave 的 key 在 header/body 不受影响，
+统一提级是为 serpapi 探活兜底。
 """
 import logging
 import os
@@ -31,3 +37,6 @@ def configure_logging(processors: list) -> None:
         processors=processors,
         logger_factory=structlog.stdlib.LoggerFactory(),
     )
+    # httpx 请求日志（含 URL query 的明文 api_key）必须被静默；
+    # WARNING 以下不输出——探活 serpapi 时 api_key 在 URL 里（keys.py）
+    logging.getLogger("httpx").setLevel(logging.WARNING)

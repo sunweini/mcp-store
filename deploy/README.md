@@ -110,3 +110,36 @@ API token 在 `init.sh` 运行时创建(明文只显示一次)。tool 名带 nam
 ## 从 systemd 迁移
 
 见 spec: `docs/superpowers/specs/2026-07-31-container-deployment-design.md` 的「迁移步骤」。
+
+## 存量环境迁移（zabbix-mcp 端口 8000 → 9053）
+
+本版本将 zabbix-mcp 容器端口从 8000 迁移到 **9053**（与三个搜索 MCP
+共用 9050-9500 端口段）。**已部署过旧版本的环境升级后必须校正 admin 里
+注册的 zabbix-mcp URL**，否则 gateway-proxy 会持续 502：
+
+```bash
+# 1. 登录拿 admin token（username 默认 admin）
+TOK=$(curl -s -m5 -X POST http://localhost:8081/api/login \
+  -H 'Content-Type: application/json' \
+  -d "{\"username\":\"admin\",\"password\":\"<ADMIN_INIT_PASSWORD>\"}" \
+  | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+
+# 2. 校正 zabbix-mcp URL 到 9053（PUT 会通知 proxy 热加载）
+curl -s -X PUT http://localhost:8081/api/servers/zabbix-mcp \
+  -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+  -d '{"url":"http://zabbix-mcp:9053/mcp","description":"Zabbix 告警巡检/维护期/告警确认（8 tools）"}'
+
+# 3. 验证
+curl -s http://localhost:8081/api/servers/zabbix-mcp/status \
+  -H "Authorization: Bearer $TOK"    # 期望 {"up": true, ...}
+```
+
+> 注意：`PUT /api/servers/{name}` 的 `description` 为必填（`ServerUpdate`
+> 无默认值），必须随请求体一并提交，否则 422。
+>
+> 或直接删除后重新注册（`DELETE /api/servers/zabbix-mcp` →
+> `POST /api/servers` 带新 URL），效果相同。升级后首次访问
+> `zabbix-mcp_*` 工具前务必完成本步，否则 proxy 502。
+>
+> 三个搜索 MCP（tavily/brave/serpapi）为新增服务，无存量迁移问题；
+> 全新部署（`deploy.sh`）不受影响，init.sh 已按新 URL 注册。

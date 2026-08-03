@@ -14,12 +14,14 @@ from tools.search import (
 class FakeClient:
     """Scriptable fake SerpapiClient: records calls, fails per-engine."""
 
-    def __init__(self, key, timeout=5.0, fail=None, fail_status=401, fail_body=""):
+    def __init__(self, key, timeout=5.0, fail=None, fail_status=401, fail_body="",
+                 fail_exc=None):
         self.key = key
         self.timeout = timeout
         self.fail = fail
         self.fail_status = fail_status
         self.fail_body = fail_body
+        self.fail_exc = fail_exc  # 注入任意异常（模拟 httpx 网络异常）
         self.calls = []
         self.closed = 0
 
@@ -31,6 +33,8 @@ class FakeClient:
 
     async def search(self, engine, params):
         self.calls.append((engine, dict(params)))
+        if self.fail_exc is not None:
+            raise self.fail_exc
         if self.fail == engine:
             raise SerpapiError(self.fail_status, self.fail_body or "scripted failure")
         return {"engine": engine, "params": dict(params)}
@@ -308,6 +312,64 @@ async def test_clients_closed_on_success_fail_and_failover():
                          client_factory=_client_factory(made3, fail="google",
                                                         fail_once=True))
     assert [c.closed for c in made3] == [1, 1]
+
+
+# ── 错误消息防泄漏（评审 I-1 回归）────────────────────────────────────────────
+
+
+class _LeakyURLException(Exception):
+    """模拟 httpx 网络异常：repr/str 含完整请求 URL（带 api_key query）。
+
+    httpx.ConnectError/TimeoutError 等的 message 都带请求 URL——
+    serpapi 的 api_key 在 query 里，最终失败消息若 str(exc) 会把
+    明文 key 带进工具返回体。真实异常示例：
+    "connect error: connect ECONNREFUSED 127.0.0.1:1
+     https://serpapi.com/search.json?...&api_key=tvly-xxx"
+    """
+
+    def __str__(self):
+        return ("connect error: ECONNREFUSED "
+                "https://serpapi.com/search.json?engine=google&q=x&api_key=SECRET-KEY-123")
+
+
+async def test_network_error_message_does_not_leak_api_key():
+    """网络异常（无 status_code 属性）→ 泛化消息，不得含 URL/key。"""
+    pool = FakePool(records={"k1": _rec("k1", "SERP-k1")})
+    made = []
+
+    def _make(key, timeout):
+        client = FakeClient(key, timeout=timeout, fail_exc=_LeakyURLException())
+        made.append(client)
+        return client
+
+    result = await serpapi_google("q", pool=pool, client_factory=_make)
+    assert result["status"] == "error"
+    # 消息不得泄漏 key / URL（httpx 异常 str 含完整 query URL）
+    assert "SECRET-KEY-123" not in result["message"]
+    assert "serpapi.com" not in result["message"]
+    assert "SECRET-KEY-123" not in str(result)
+    # 泛化消息保留排障信息
+    assert "网络/超时" in result["message"]
+
+
+async def test_http_error_message_has_status_and_truncated_body_only():
+    """业务异常（SerpapiError）→ 消息只含 status + 截断 body（评审 I-1）。
+
+    body 是响应体文本（SerpAPI 实测不回显 api_key，仅含错误说明），
+    非请求 URL；消息格式锁定为 "serpapi error <status>: <body>"。
+    """
+    pool = FakePool(records={"k1": _rec("k1", "SERP-k1")})
+    made = []
+    result = await serpapi_google(
+        "q", pool=pool,
+        client_factory=_client_factory(made, fail="google", fail_status=401,
+                                       fail_body="Unauthorized: missing or invalid API key."))
+    assert result["status"] == "error"
+    # 消息只含 status + body，不含请求 URL（api_key 在 URL query 里）
+    assert result["message"].startswith("serpapi error 401: ")
+    assert "Unauthorized" in result["message"]
+    assert "SERP-k1" not in result["message"]
+    assert "serpapi.com" not in result["message"]
 
 
 # ── MCP 注册 ─────────────────────────────────────────────────────────────────

@@ -115,7 +115,15 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
                 return {"status": "ok", "data": resp2}
             kind2 = _classify(exc2)
             await pool.on_error(key_rec2["key_id"], kind2 or ErrorKind.EXHAUSTED)
-    return {"status": "error", "message": str(exc)}
+    # 最终失败消息只含 status + 截断 body（SerpapiError.detail 是
+    # resp.text 截断，安全）——不落 str(exc)：网络异常（httpx.HTTPError）
+    # 的 repr 带完整请求 URL，serpapi 的 api_key 在 query 里，str(exc)
+    # 会把明文 key 带进工具返回体（评审 I-1，与 client 层日志同防线）
+    status = getattr(exc, "status_code", None)
+    detail = getattr(exc, "detail", "") or ""
+    if status is not None:
+        return {"status": "error", "message": f"serpapi error {status}: {detail[:200]}"}
+    return {"status": "error", "message": "serpapi 请求失败（网络/超时），请稍后重试"}
 
 
 async def serpapi_google(query: str, gl: str | None = None, hl: str | None = None,

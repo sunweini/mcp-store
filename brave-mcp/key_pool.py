@@ -73,6 +73,7 @@ class KeyPool:
             exc = task.exception()
             if exc is not None:
                 logger.error("key_pool_listener_stopped",
+                             service="brave-mcp",
                              provider=self.provider,
                              error=type(exc).__name__)
 
@@ -91,6 +92,7 @@ class KeyPool:
                 # Redis 短暂故障不致命 — 保留现有池，等待下次通知；
                 # 有日志便于排障（热更新静默失效是最难查的问题之一）
                 logger.warning("key_pool_listen_retry",
+                               service="brave-mcp",
                                provider=self.provider, error="pubsub_error")
                 await asyncio.sleep(5)
 
@@ -103,6 +105,7 @@ class KeyPool:
                 rec = json.loads(payload)
             except json.JSONDecodeError:
                 logger.warning("key_pool_skip_bad_record",
+                               service="brave-mcp",
                                provider=self.provider, error="bad_json")
                 continue
             rec["key_id"] = key_id
@@ -111,6 +114,7 @@ class KeyPool:
         self._records = records
         self._key_hash = key_hash
         logger.info("key_pool_reloaded",
+                    service="brave-mcp",
                     provider=self.provider, key_count=len(records))
 
     async def next_key(self) -> dict | None:
