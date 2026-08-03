@@ -34,6 +34,7 @@ const pages = [
   { id: 'dashboard', label: '监控面板', crumb: 'observe' },
   { id: 'servers', label: 'Servers', crumb: 'registry' },
   { id: 'tokens', label: 'Tokens', crumb: 'access' },
+  { id: 'api-keys', label: 'API Keys', crumb: 'search' },
 ]
 
 const current = computed(() => pages.find(p => p.id === props.page) || pages[0])

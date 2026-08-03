@@ -6,6 +6,7 @@ const routes = [
   { path: '/', name: 'dashboard', component: () => import('../views/Dashboard.vue') },
   { path: '/servers', name: 'servers', component: () => import('../views/Servers.vue') },
   { path: '/tokens', name: 'tokens', component: () => import('../views/Tokens.vue') },
+  { path: '/api-keys', name: 'api-keys', component: () => import('../views/APIKeys.vue') },
 ]
 
 const router = createRouter({ history: createWebHistory(), routes })

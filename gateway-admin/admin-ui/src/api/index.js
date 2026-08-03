@@ -29,3 +29,10 @@ export function refreshTools(name)          { return apiFetch(`/api/servers/${na
 export function getTokens()                 { return apiFetch('/api/tokens') }
 export function createToken(data)           { return apiFetch('/api/tokens', { method:'POST', body:JSON.stringify(data) }) }
 export function deleteToken(id)             { return apiFetch(`/api/tokens/${id}`, { method:'DELETE' }) }
+
+// ── Search API keys ─────────────────────────────
+export function getSearchKeys(provider)     { return apiFetch(`/api/search-keys/${provider}`) }
+export function addSearchKey(provider, data) { return apiFetch(`/api/search-keys/${provider}`, { method:'POST', body:JSON.stringify(data) }) }
+export function updateSearchKey(provider, keyId, data) { return apiFetch(`/api/search-keys/${provider}/${keyId}`, { method:'PUT', body:JSON.stringify(data) }) }
+export function deleteSearchKey(provider, keyId) { return apiFetch(`/api/search-keys/${provider}/${keyId}`, { method:'DELETE' }) }
+export function getSearchKeyUsage(provider)  { return apiFetch(`/api/search-keys/${provider}/usage`) }
