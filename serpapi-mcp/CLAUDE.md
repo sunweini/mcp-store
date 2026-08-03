@@ -43,7 +43,7 @@ KeyPool (Redis search:keys:serpapi + pubsub 热更新) ←──────┘
 | HTTP / 响应 | ErrorKind | 效果 |
 |---|---|---|
 | 401 | INVALID | 永久剔除 |
-| 429 | RATE_LIMIT | 冷却 30s（Retry-After 可覆盖） |
+| 429 | RATE_LIMIT | 冷却 30s（Retry-After 头未解析，恒用默认——设计选择：避免外部控制 cooldown 过长） |
 | 200 + body 含 quota 关键词 | EXHAUSTED | 永久剔除（欠费） |
 | 其余 4xx/5xx | EXHAUSTED | 标记不可用 |
 | 网络/超时 | EXHAUSTED | 同上 |
@@ -91,9 +91,13 @@ KeyPool (Redis search:keys:serpapi + pubsub 热更新) ←──────┘
   （success/error）
 - `search_request_duration_seconds` — histogram，bucket 对齐 SLO：
   0.1/0.5/1/3/5
-- `search_quota_remaining{provider}` / `search_quota_ratio{provider}`
-  / `search_key_pool_size{provider}` / `search_key_invalid_total{provider}`
-  — 由 server 层周期性采集（Task 3+ 接线）
+- `search_quota_remaining{provider}` — 池内最低 remaining
+- `search_quota_ratio{provider, level}` — 按 provider 聚合的档位
+  （warning<10% / critical<5% / exhausted=0，配合 alertmanager 告警）
+- `search_key_pool_size{provider}` / `search_key_invalid_total{provider}`
+- 接线：配额类指标由 KeyPool 在 `reload()`（启动/热更新）与
+  `on_error(INVALID)`（key 剔除）后经 `record_quota_metrics()` 刷新，
+  数据源是 `health_snapshot()`（remaining 为本地估算，无官方端点）
 - **key_id 与明文 key 禁止进入 metric label 与日志**（OBS-CORE-003）
 
 ### Logs

@@ -29,7 +29,7 @@ mcpstore/
 ### MCP Gateway 架构
 
 ```
-MCP Client → gateway-proxy:8080 → [zabbix-mcp:8000, github-mcp:8001, ...]
+MCP Client → gateway-proxy:8080 → [zabbix-mcp:9053, github-mcp:8001, ...]
                   ↑
             gateway-admin:8081 (管理界面)
                   ↑

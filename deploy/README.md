@@ -4,7 +4,8 @@
 
 - Docker 20.10+ 与 Docker Compose v2
 - 服务器 linux/amd64
-- 端口可用:8081(admin)、8082(proxy)、9465(metrics)
+- 端口可用:8081(admin)、8082(proxy)、9465(proxy metrics)、
+  9466/9467/9468(搜索 MCP metrics: tavily/brave/serpapi)
 
 ## 快速部署
 
@@ -59,14 +60,33 @@ bash deploy/init.sh
                       -> serpapi-mcp:9052(内部)
 :8081 -> gateway-admin (API + Vue UI)
 :9465 -> gateway-proxy metrics
+:9466 -> tavily-mcp metrics (容器内 9464)
+:9467 -> brave-mcp metrics (容器内 9464)
+:9468 -> serpapi-mcp metrics (容器内 9464)
 redis:6379 (内部,共享存储)
 ```
 
-服务间用容器名互访。各 MCP、redis 不对外暴露。
+服务间用容器名互访。各 MCP 的 MCP 端口、redis 不对外暴露；
+仅 metrics 端口映射到宿主（见上），供宿主 Prometheus scrape。
 
 三个搜索 MCP 的 API key 不配环境变量——通过 admin 界面
 「API Keys」页写入 Redis（`search:keys:<provider>`），MCP 启动时从 KeyPool 读取。
 搜索 MCP 需先在 UI 配好 key，工具调用才能成功。
+
+## Metrics scrape 配置
+
+| 目标 | 地址 | 指标 |
+|---|---|---|
+| gateway-proxy | `http://<host>:9465/metrics` | 请求量/延迟（proxy 层） |
+| tavily-mcp | `http://<host>:9466/metrics` | `search_*` 指标族（quota 告警） |
+| brave-mcp | `http://<host>:9467/metrics` | `search_*` 指标族 |
+| serpapi-mcp | `http://<host>:9468/metrics` | `search_*` 指标族 |
+
+`search_quota_ratio{provider, level}` 按 provider 聚合（level:
+warning<10% / critical<5% / exhausted=0），配合 alertmanager 告警；
+`search_quota_remaining` / `search_key_pool_size` / `search_key_invalid_total`
+在 key 池 reload（热更新/启动）与 key 失效剔除后刷新，scrape 周期建议
+<= 60s 对齐告警时效。各容器内统一监听 9464，宿主端口映射互不冲突。
 
 ## 运维命令
 

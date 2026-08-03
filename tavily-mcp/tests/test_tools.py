@@ -11,15 +11,22 @@ from tools.search import (
 
 
 class FakeClient:
-    """Scriptable fake TavilyClient: records calls, fails per-endpoint."""
+    """Scriptable fake TavilyClient: records calls, fails per-endpoint.
 
-    def __init__(self, key, timeout=5.0, fail=None, fail_status=401):
+    remaining_field: 非 None 时 search 响应自带 remaining（I-2 主路径
+    验证用）；usage_calls 统计 usage() 调用次数（周期兜底验证用）。
+    """
+
+    def __init__(self, key, timeout=5.0, fail=None, fail_status=401,
+                 remaining_field=None):
         self.key = key
         self.timeout = timeout
         self.fail = fail
         self.fail_status = fail_status
+        self.remaining_field = remaining_field
         self.calls = []
         self.closed = 0
+        self.usage_calls = 0
 
     async def close(self):
         # 镜像真实 TavilyClient.close()（异步关闭 httpx.AsyncClient）。
@@ -27,8 +34,15 @@ class FakeClient:
         # getattr 恒为 None、连接泄漏依旧且无测试能发现
         self.closed += 1
 
+    async def usage(self):
+        self.usage_calls += 1
+        return {"plan_usage": {"search": {"remaining": 123}}}
+
     async def search(self, params):
-        return await self._hit("search", params, {"results": [{"title": "t", "url": "u"}]})
+        payload = {"results": [{"title": "t", "url": "u"}]}
+        if self.remaining_field is not None:
+            payload["remaining"] = self.remaining_field
+        return await self._hit("search", params, payload)
 
     async def extract(self, params):
         return await self._hit("extract", params, {"results": [{"url": "u", "raw_content": "x"}]})
@@ -67,6 +81,7 @@ class FakePool:
         self._records = records
         self.errors = []
         self.successes = []
+        self.success_remaining = []  # (key_id, remaining) 配对（I-2 断言用）
 
     async def next_key(self):
         for rec in self._records.values():
@@ -76,6 +91,7 @@ class FakePool:
 
     async def on_success(self, key_id, remaining=None):
         self.successes.append(key_id)
+        self.success_remaining.append((key_id, remaining))
 
     async def on_error(self, key_id, kind, retry_after=None):
         self.errors.append((key_id, kind))
@@ -83,16 +99,19 @@ class FakePool:
             self._records[key_id]["status"] = kind.value
 
 
-def _client_factory(made, fail=None, fail_status=401, fail_once=False):
+def _client_factory(made, fail=None, fail_status=401, fail_once=False,
+                    remaining_field=None):
     """Build a client_factory; every created FakeClient appended to `made`.
 
     fail: endpoint 名（该 endpoint 所有调用失败）。fail_once: 仅第一个
     client 失败（failover 成功场景）；需与 fail 联用。
+    remaining_field: 透传给 FakeClient（search 响应带 remaining 用）。
     """
     def _make(key, timeout):
         client = FakeClient(key, timeout=timeout,
                             fail=(fail if not fail_once or not made else None),
-                            fail_status=fail_status)
+                            fail_status=fail_status,
+                            remaining_field=remaining_field)
         made.append(client)
         return client
     return _make
@@ -315,6 +334,84 @@ async def test_clients_closed_on_success_fail_and_failover():
                         client_factory=_client_factory(made3, fail="search",
                                                        fail_once=True))
     assert [c.closed for c in made3] == [1, 1]
+
+
+# ── remaining 刷新（final-review I-2）───────────────────────────────────────
+
+
+async def test_response_remaining_written_to_pool():
+    """主路径：search 响应自带 remaining → 直接回写 pool（零额外请求）。"""
+    pool = FakePool()
+    made = []
+    result = await tavily_search("q", pool=pool,
+                                 client_factory=_client_factory(made, remaining_field=777))
+    assert result["status"] == "ok"
+    assert pool.success_remaining == [("k1", 777)]
+    assert made[0].usage_calls == 0  # 响应已有 remaining，不打 /usage
+
+
+async def test_failover_writes_remaining_of_second_key():
+    """failover 成功路径同样回写 remaining（k2 的 remaining 进 k2 记录）。"""
+    pool = FakePool(records={
+        "k1": _rec("k1", "tvly-k1"),
+        "k2": _rec("k2", "tvly-k2"),
+    })
+    made = []
+    result = await tavily_search(
+        "q", pool=pool,
+        client_factory=_client_factory(made, fail="search", fail_once=True,
+                                       remaining_field=666))
+    assert result["status"] == "ok"
+    assert pool.success_remaining == [("k2", 666)]
+    assert pool.successes == ["k2"]
+
+
+async def test_usage_refresh_periodic_not_every_request(monkeypatch):
+    """兜底路径：无 remaining 响应时周期调 usage（每 50 次成功 1 次），
+    不是每次请求都打 /usage——防配额浪费（I-2 核心）。"""
+    import tools.search as search_mod
+
+    pool = FakePool()
+    # 固定计数：第 50 次成功触发刷新（模 USAGE_REFRESH_INTERVAL）
+    monkeypatch.setattr(search_mod, "_usage_refresh_counter", 49)
+    made = []
+    result = await tavily_search("q", pool=pool,
+                                 client_factory=_client_factory(made))
+    assert result["status"] == "ok"
+    # usage 调用在新建的 usage client 上（搜索 client 已关）；made[1] 即它
+    assert made[-1].usage_calls == 1  # 恰好在周期点 → 调了 usage
+    assert pool.success_remaining == [("k1", 123)]  # FakeClient.usage 返回 123
+
+    # 非周期点的请求不调 usage（下一次成功在计数 50→51）
+    made2 = []
+    pool2 = FakePool()
+    await tavily_search("q", pool=pool2, client_factory=_client_factory(made2))
+    assert made2[0].usage_calls == 0
+    assert pool2.success_remaining == [("k1", None)]  # 无 remaining 可回写
+
+
+async def test_usage_refresh_failure_is_silent():
+    """usage 刷新失败不阻塞搜索：remaining 保持 None，结果仍 ok。"""
+    pool = FakePool()
+    made = []
+
+    class FailUsageClient(FakeClient):
+        async def usage(self):
+            self.usage_calls += 1
+            raise RuntimeError("usage endpoint down")
+
+    import tools.search as search_mod
+    search_mod._usage_refresh_counter = 49  # 触发周期点
+
+    def _make(key, timeout):
+        client = FailUsageClient(key, timeout=timeout)
+        made.append(client)
+        return client
+
+    result = await tavily_search("q", pool=pool, client_factory=_make)
+    assert result["status"] == "ok"
+    assert made[-1].usage_calls == 1  # usage client 是新建的（made[-1]）
+    assert pool.success_remaining == [("k1", None)]
 
 
 # ── MCP 注册 ────────────────────────────────────────────────────────────────

@@ -19,6 +19,14 @@ import structlog
 
 logger = structlog.get_logger()
 
+try:
+    from telemetry import record_quota_metrics
+except ImportError:
+    # telemetry 依赖缺失（精简部署/测试环境）时指标写入口降级 no-op——
+    # 与 tools/__init__.py 的防御式导入同一模式，池功能不依赖指标
+    def record_quota_metrics(provider: str, snapshot: dict) -> None:
+        return None
+
 LOW_QUOTA_RATIO = 0.05      # remaining/quota < 5% → skip, fallback only
 WARN_QUOTA_RATIO = 0.10     # remaining/quota < 10% → warning, still used
 DEFAULT_COOLDOWN_SECONDS = 30
@@ -116,6 +124,9 @@ class KeyPool:
         logger.info("key_pool_reloaded",
                     service="tavily-mcp",
                     provider=self.provider, key_count=len(records))
+        # 池状态刚整体刷新（热更新/启动）——配额告警指标同步刷新，
+        # 否则 admin 侧改配额/增删 key 后 scrape 数据停留在旧值
+        record_quota_metrics(self.provider, self.health_snapshot())
 
     async def next_key(self) -> dict | None:
         """Pick the best key. Priority:
@@ -183,6 +194,11 @@ class KeyPool:
         if kind == ErrorKind.INVALID:
             rec["status"] = "invalid"
             rec["cooldown_until"] = None
+            # key 被剔除是池健康状态的关键变化——立即刷新告警指标，
+            # 否则 invalid_count 增长要到下次 reload 才反映到 Prometheus
+            # （EXHAUSTED 同样永久剔除，但 remaining=0 已由 quota 指标
+            # 覆盖；RATE_LIMIT 是临时冷却不改变池长期健康，不刷新）
+            record_quota_metrics(self.provider, self.health_snapshot())
         elif kind == ErrorKind.EXHAUSTED:
             rec["status"] = "exhausted"
             rec["cooldown_until"] = None
@@ -194,6 +210,43 @@ class KeyPool:
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + seconds))
         rec["last_error"] = kind.value
         await self._write(key_id, rec)
+
+    def health_snapshot(self) -> dict:
+        """池健康摘要（spec KeyPool 设计节）——配额指标的数据源。
+
+        返回 {lowest_ratio, lowest_remaining, pool_size, invalid_count}：
+        - lowest_ratio / lowest_remaining：该源所有 key 中剩余配额最低者
+          （spec 可观测性节：指标按 provider 聚合，取最低档告警，避免
+          key 级高基数 label）。remaining 未知的 key 不参与 ratio 计算
+          （无官方数据无法算占比），但 remaining=0 的已耗尽 key 永远
+          是最低档（其 ratio 为 0）。
+        - pool_size：池内 key 总数（含 invalid/exhausted——大小反映
+          管理面配置规模，不是可用数）
+        - invalid_count：invalid 状态 key 数（告警「key 大量失效」用）
+        纯内存计算（不触 Redis）——reload/on_error 后同步调用无 IO 开销。
+        """
+        ratios: list[float] = []
+        remaining_vals: list[int] = []
+        pool_size = 0
+        invalid_count = 0
+        for rec in self._records.values():
+            pool_size += 1
+            if rec.get("status") == "invalid":
+                invalid_count += 1
+            remaining = rec.get("remaining")
+            if isinstance(remaining, (int, float)):
+                remaining_vals.append(remaining)
+            ratio = self._ratio(rec)
+            if ratio is not None:
+                ratios.append(ratio)
+        return {
+            "lowest_ratio": min(ratios) if ratios else None,
+            # 无任何 remaining 数据时为 None（unknown-quota 池不应误报
+            # 耗尽）；remaining=0 的 key 会给出 0，让 exhausted 档可触发
+            "lowest_remaining": min(remaining_vals) if remaining_vals else None,
+            "pool_size": pool_size,
+            "invalid_count": invalid_count,
+        }
 
     async def probe(self, key: str) -> dict:
         """Probe a key at add-time. Returns record dict with status

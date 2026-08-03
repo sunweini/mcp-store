@@ -88,7 +88,7 @@ Key 记录字段：
 | HTTP / 响应 | 处理 |
 |---|---|
 | 401 | key 失效 → 永久剔除（INVALID） |
-| 429 | 限流 → 冷却 30s（Retry-After 可覆盖，RATE_LIMIT） |
+| 429 | 限流 → 冷却 30s（恒用默认，Retry-After 头未解析；RATE_LIMIT） |
 | 200 + body 含 `account has exceeded quota` / `quota exceeded` / `insufficient credits` | 欠费 → 永久剔除（EXHAUSTED） |
 | 其余 4xx/5xx / 网络错误 | 标记不可用（EXHAUSTED） |
 

@@ -6,6 +6,9 @@
 #   - gateway-proxy 9465 -> 宿主 9465(metrics,避开 9464 本地默认)
 #   - gateway-admin 8081 -> 宿主 8081
 #   - zabbix-mcp / redis 不映射宿主端口(仅容器内网互访,减少攻击面)
+#   - 搜索 MCP metrics: 9466/9467/9468 -> 容器内 9464
+#     (tavily/brave/serpapi;宿主端避开 proxy 的 9465)
+#   - 搜索 MCP 的 MCP 端口 9050/9051/9052 不映射宿主(仅容器内网互访)
 #
 # 服务间互访: 用容器名 + 容器内端口(redis:6379, zabbix-mcp:9053, gateway-proxy:9465)
 #
@@ -82,10 +85,14 @@ services:
     depends_on: [redis]
     restart: unless-stopped
 
-  # 三个搜索 MCP:容器内端口 9050/9051/9052,不映射宿主
+  # 三个搜索 MCP:容器内端口 9050/9051/9052,不映射宿主 MCP 端口
+  # (仅容器内网互访);metrics 端口各自映射到宿主 9466/9467/9468
+  # (容器内统一 9464,宿主端避开 gateway-proxy 的 9465)
   # 无 env_file / 无 key env——API key 由 gateway-admin 写入 Redis(keys.py),MCP 启动时从 KeyPool 读取
   tavily-mcp:
     build: ../tavily-mcp
+    ports:
+      - "9466:9464"
     environment:
       REDIS_URL: redis://redis:6379/0
       MCP_HOST: "0.0.0.0"
@@ -93,6 +100,7 @@ services:
       LOG_FORMAT: json
       LOG_FILE: /app/logs/tavily-mcp.log
       TAVILY_QUOTA_DEFAULT: "1000"
+      PROMETHEUS_PORT: "9464"
     volumes:
       - ./logs/tavily-mcp:/app/logs
     networks: [mcp-net]
@@ -101,6 +109,8 @@ services:
 
   brave-mcp:
     build: ../brave-mcp
+    ports:
+      - "9467:9464"
     environment:
       REDIS_URL: redis://redis:6379/0
       MCP_HOST: "0.0.0.0"
@@ -108,6 +118,7 @@ services:
       LOG_FORMAT: json
       LOG_FILE: /app/logs/brave-mcp.log
       BRAVE_QUOTA_DEFAULT: "2000"
+      PROMETHEUS_PORT: "9464"
     volumes:
       - ./logs/brave-mcp:/app/logs
     networks: [mcp-net]
@@ -116,6 +127,8 @@ services:
 
   serpapi-mcp:
     build: ../serpapi-mcp
+    ports:
+      - "9468:9464"
     environment:
       REDIS_URL: redis://redis:6379/0
       MCP_HOST: "0.0.0.0"
@@ -123,6 +136,7 @@ services:
       LOG_FORMAT: json
       LOG_FILE: /app/logs/serpapi-mcp.log
       SERPAPI_QUOTA_DEFAULT: "100"
+      PROMETHEUS_PORT: "9464"
     volumes:
       - ./logs/serpapi-mcp:/app/logs
     networks: [mcp-net]

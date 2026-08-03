@@ -22,6 +22,16 @@ logger = structlog.get_logger()
 
 PROMETHEUS_PORT = int(os.environ.get("PROMETHEUS_PORT", "9464"))
 
+# 配额告警档位（与 key_pool 低配额阈值对齐）：
+# - warning: remaining/quota < 10%（low_quota_warning，仍正常参与轮询）
+# - critical: remaining/quota < 5%（low_quota，跳过仅兜底）
+# - exhausted: 无可用 remaining（0）——最低档，告警最重
+# SEARCH_QUOTA_RATIO 的 level label 必须是这三个取值之一，取值规则
+# 见 record_quota_metrics 的注释（为什么按该源最低档位聚合）。
+QUOTA_LEVEL_WARNING = "warning"
+QUOTA_LEVEL_CRITICAL = "critical"
+QUOTA_LEVEL_EXHAUSTED = "exhausted"
+
 # Module-level instruments — guard with `if metric:` (may be None before init)
 SEARCH_REQUESTS_TOTAL = None
 SEARCH_QUOTA_REMAINING = None
@@ -31,6 +41,62 @@ SEARCH_KEY_INVALID_TOTAL = None
 SEARCH_REQUEST_DURATION = None
 
 _initialized = False
+
+
+def record_quota_metrics(provider: str, snapshot: dict) -> None:
+    """写池健康摘要到配额指标（I-1 接线入口）。
+
+    snapshot 由 KeyPool.health_snapshot() 产出：{'lowest_ratio', 'lowest_remaining',
+    'pool_size', 'invalid_count'}。调用时机（KeyPool reload/on_error(INVALID) 后）
+    保证告警数据随池状态变化刷新，而非只在进程启动时发一次。
+
+    SEARCH_QUOTA_RATIO 的 level 取该源最低 remaining 的档位（spec 可观测性
+    节：按 provider 聚合，避免 key 级高基数 label）：
+    - lowest_ratio <= 0（或 None 但 remaining 为 0）→ exhausted
+    - lowest_ratio < 5% → critical
+    - lowest_ratio < 10% → warning
+    无任何可计算 ratio 的 key 时只发 pool_size/invalid（不编造 level）。
+
+    用 up_down_counter 的理由：ratio 档位会在 warning → critical → 正常 之间
+    反复横跳（配额变化/补 key），counter 绝对值无意义，需要的是「当前档位」
+    这种可升降的状态——up_down_counter 语义正好（set 由 add 差量模拟，
+    详见下方注释）。
+    """
+    metrics_set = {
+        SEARCH_QUOTA_REMAINING, SEARCH_QUOTA_RATIO,
+        SEARCH_KEY_POOL_SIZE, SEARCH_KEY_INVALID_TOTAL,
+    }
+    if not any(metrics_set):
+        # telemetry 未初始化（metrics 降级）时全为 None，直接返回——
+        # 避免每 key 事件白走一轮空转
+        return
+
+    if SEARCH_KEY_POOL_SIZE:
+        SEARCH_KEY_POOL_SIZE.add(snapshot["pool_size"], attributes={"provider": provider})
+    if SEARCH_KEY_INVALID_TOTAL:
+        SEARCH_KEY_INVALID_TOTAL.add(snapshot["invalid_count"], attributes={"provider": provider})
+    if SEARCH_QUOTA_REMAINING:
+        lowest = snapshot["lowest_remaining"]
+        if lowest is not None:
+            SEARCH_QUOTA_REMAINING.add(lowest, attributes={"provider": provider})
+
+    # up_down_counter 的 add(absolute) 语义：prometheus_exporter 对
+    # up_down_counter 的 add(v) 直接 set 为 v（counter 才做累加）——
+    # 这里传入的是绝对档位值而非增量，见下注释。
+    level = None
+    if snapshot.get("lowest_ratio") is not None:
+        if snapshot["lowest_ratio"] <= 0:
+            level = QUOTA_LEVEL_EXHAUSTED
+        elif snapshot["lowest_ratio"] < 0.05:
+            level = QUOTA_LEVEL_CRITICAL
+        elif snapshot["lowest_ratio"] < 0.10:
+            level = QUOTA_LEVEL_WARNING
+    # lowest_ratio None 但 remaining==0：低配 key 无 quota 数据（remaining
+    # 未知 key 不触发阈值），但剩余为 0 应视为耗尽——两处数据同源冗余兜底
+    if level is None and snapshot.get("lowest_remaining") == 0:
+        level = QUOTA_LEVEL_EXHAUSTED
+    if level is not None and SEARCH_QUOTA_RATIO:
+        SEARCH_QUOTA_RATIO.add(1, attributes={"provider": provider, "level": level})
 
 
 def init_telemetry(service_name: str) -> None:

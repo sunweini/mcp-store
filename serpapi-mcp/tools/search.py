@@ -12,7 +12,6 @@ Error/failover strategy (per spec 错误处理节):
 - client_factory 注入: 默认构造真实 SerpapiClient(5s 超时),测试注入
   FakeClient 驱动公开方法,不依赖私有 _http
 """
-import json
 from typing import Callable, Optional
 
 from fastmcp import FastMCP

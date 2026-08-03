@@ -25,6 +25,16 @@ logger = structlog.get_logger()
 LONG_TASK_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 5.0
 
+# remaining 刷新策略（final-review I-2）：
+# - 主路径：search 响应自带 remaining 字段则直接回写——零额外 API 请求
+# - 兜底：每 USAGE_REFRESH_INTERVAL 次成功请求调一次 GET /usage 刷新
+#   官方 remaining（50:1 的请求比，防止每次成功都打 /usage 浪费配额；
+#   也避免长期不刷新导致 low_quota 轮换基于陈旧数据）
+# 放在工具层而非 KeyPool：usage() 属于 TavilyClient，KeyPool 保持
+# provider 无关（brave/serpapi 无官方 remaining 端点，不背此逻辑）
+USAGE_REFRESH_INTERVAL = 50
+_usage_refresh_counter = 0
+
 # 单一来源：工具名 → endpoint/超时/重试策略。endpoint 即 TavilyClient
 # 公开方法名（search/extract/crawl/map/research）；超时区分长任务（60s）
 # 与轻查询（5s）；重试仅幂等操作允许（spec 错误处理节）。曾有三套平行
@@ -66,7 +76,12 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
     factory = client_factory or _default_factory
 
     async def _once(rec: dict) -> tuple:
-        """Single attempt: returns (resp, exc); resp None on failure.
+        """Single attempt: returns (resp, remaining_or_None, exc).
+
+        remaining 从响应体顶层 remaining 字段取（Tavily 官方 remaining
+        会随 search 响应返回时用它——零额外请求；响应无该字段时为
+        None，交给 _maybe_refresh_usage 周期兜底）。FakeClient 无
+        remaining 时 getattr 兜底为 None。
 
         finally 里 close：真实 TavilyClient 每次调用新建 httpx.AsyncClient，
         用完即关防连接泄漏。关闭方法名是 close()——aclose 是 httpx.
@@ -79,9 +94,10 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
             # endpoint 来自模块常量（非用户输入），getattr 安全；
             # TavilyClient 方法名与 endpoint 同名
             resp = await getattr(client, endpoint)(params)
-            return resp, None
+            remaining = resp.get("remaining") if isinstance(resp, dict) else None
+            return resp, remaining, None
         except Exception as exc:
-            return None, exc
+            return None, None, exc
         finally:
             closer = getattr(client, "close", None)
             if closer is not None:
@@ -90,13 +106,25 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
                 except Exception:
                     pass
 
+    async def _report_success(rec: dict, remaining) -> None:
+        """成功记账 + remaining 刷新（I-2）。
+
+        响应自带 remaining 优先（新鲜、零成本，见 _once）；缺失时走
+        周期 usage() 兜底（_usage_refresh_interval_for 控制请求比）。
+        记账统一在此执行，刷新只回传 remaining——避免双写。
+        """
+        if remaining is None:
+            remaining = await _maybe_refresh_usage(
+                pool, rec, factory, _usage_refresh_interval_for())
+        await pool.on_success(rec["key_id"], remaining=remaining)
+
     key_rec = await pool.next_key()
     if key_rec is None:
         return {"status": "error",
                 "message": "tavily 该源所有 API key 不可用，请在前台检查 key 池状态"}
-    resp, exc = await _once(key_rec)
+    resp, remaining, exc = await _once(key_rec)
     if resp is not None:
-        await pool.on_success(key_rec["key_id"])
+        await _report_success(key_rec, remaining)
         return {"status": "ok", "data": resp}
     kind = classify_error(exc, getattr(exc, "status_code", None))
     await pool.on_error(key_rec["key_id"], kind or ErrorKind.EXHAUSTED)
@@ -105,13 +133,54 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
         # 失败的 key，None 或同 key 均表示无可换 key
         key_rec2 = await pool.next_key()
         if key_rec2 and key_rec2["key_id"] != key_rec["key_id"]:
-            resp2, exc2 = await _once(key_rec2)
+            resp2, remaining2, exc2 = await _once(key_rec2)
             if resp2 is not None:
-                await pool.on_success(key_rec2["key_id"])
+                await _report_success(key_rec2, remaining2)
                 return {"status": "ok", "data": resp2}
             kind2 = classify_error(exc2, getattr(exc2, "status_code", None))
             await pool.on_error(key_rec2["key_id"], kind2 or ErrorKind.EXHAUSTED)
     return {"status": "error", "message": str(exc)}
+
+
+async def _maybe_refresh_usage(pool, rec: dict, factory: ClientFactory,
+                               refresh_now: bool) -> int | None:
+    """周期兜底：每 USAGE_REFRESH_INTERVAL 次成功请求调一次 /usage。
+
+    只在 refresh_now 时打 /usage（全局计数已到周期点），否则零请求。
+    只返回官方 remaining，不在此记账——on_success 由调用方统一执行，
+    避免同一次成功被双写（usage 计数 zset 双倍、Redis 双写）。
+    异常静默（usage 刷新失败不阻塞搜索——low_quota 保护只是增强，
+    数据陈旧一点不致命）；返回 None 表示未取到。
+    """
+    if not refresh_now:
+        return None
+    client = factory(rec["key"], timeout=DEFAULT_TIMEOUT)
+    try:
+        body = await client.usage()
+        usage = body.get("plan_usage", {}) if isinstance(body, dict) else {}
+        search_usage = usage.get("search", {}) if isinstance(usage, dict) else {}
+        return search_usage.get("remaining")
+    except Exception:
+        # 刷新失败不致命：保留现有 remaining，下次周期再试
+        return None
+    finally:
+        closer = getattr(client, "close", None)
+        if closer is not None:
+            try:
+                await closer()
+            except Exception:
+                pass
+
+
+def _usage_refresh_interval_for() -> bool:
+    """当前请求是否轮到 usage 周期刷新（进程级计数，成功请求递增）。
+
+    counter 在「未轮到」时也递增：用 1/N 判定而非取模后置零——
+    避免连续 N 个成功请求在同一秒内全部触发（无意义地扎堆打 /usage）。
+    """
+    global _usage_refresh_counter
+    _usage_refresh_counter += 1
+    return _usage_refresh_counter % USAGE_REFRESH_INTERVAL == 0
 
 
 async def tavily_search(
