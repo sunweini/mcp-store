@@ -119,7 +119,7 @@ class KeyPool:
 
 - **可用量 < 5%**：key 状态标 `low_quota`。KeyPool 正常轮询时**跳过**该 key；仅当池内其余 key 全不可用（invalid/cooldown/exhausted）时**兜底使用**，避免浪费剩余配额。
 - **可用量 < 10%**：状态标 `low_quota_warning`（仍正常参与轮询），前台告警提示。
-- 可用量计算：`remaining / monthly_quota`；`remaining` 无官方数据时（brave/serpapi）用 `monthly_quota - 本地当月计数`。
+- 可用量计算：`remaining / monthly_quota`；`remaining` 无官方数据时（brave/serpapi）用 `monthly_quota - 本地当月计数`。`monthly_quota` 未设置或 `remaining` 未知时，该 key 不触发低配额阈值（视为正常参与轮询），前台显示"—"。
 
 ## 各源工具
 
@@ -164,10 +164,10 @@ class KeyPool:
 ## 错误处理
 
 - **池空/全不可用**：工具返回明确错误 `该源所有 API key 不可用: #1 invalid #2 cooldown 至 14:32`。
-- **单 key 失败**：自动换池内下一可用 key 重试 1 次；再次失败返回错误。
-- **外部 API 超时**：httpx 5s 超时，超时返回错误不重试（避免浪费配额）。
+- **单 key 失败**：自动换池内下一可用 key 重试 1 次。**仅幂等轻查询自动重试**（tavily_search/map/extract、brave 两工具、serpapi 各引擎）；**tavily_crawl/research 为长任务不重试**，直接返回错误（避免重复消耗配额与时间）。再次失败返回错误。
+- **外部 API 超时**：httpx 5s 超时，超时返回错误不重试（避免浪费配额）。crawl/research 超时上限放宽至 60s。
 - **Redis 不可用**：key 池退化为启动时加载的静态快照，请求照常（容忍 Redis 短暂故障）；写回失败仅记日志。
-- **探活失败**：新 key 添加时失败则标 invalid 不入池，前台可见原因。
+- **探活失败**：新 key 添加时失败则标 invalid 不入池，前台可见原因。探活计入该 key 配额但不计入本地用量统计。
 
 ## 前台管理（gateway-admin API Keys 模块）
 
@@ -210,7 +210,7 @@ gateway-admin 现有 Vue3 前端加 "API Keys" 菜单页：
 - Prometheus 指标（每源 server）：
   - `search_requests_total{provider, engine, status}`（低基数：status 分 success/rate_limit/invalid/exhausted/timeout）
   - `search_quota_remaining{provider}`（可告警：配额耗尽 → 提示换 key）
-  - `search_quota_ratio{provider, level}`（level: warning<10% / critical<5% / exhausted=0，配合 alertmanager 告警）
+  - `search_quota_ratio{provider, level}`（**按 provider 聚合，取该源最低 remaining 的 key**，避免 key 级高基数 label；level: warning<10% / critical<5% / exhausted=0，配合 alertmanager 告警）
   - `search_key_pool_size{provider}`、`search_key_invalid_total{provider}`
   - histogram `search_request_duration_seconds` 自定义 bucket 对齐 SLO（100ms/500ms/1s/3s/5s）
 - key_id / api key 本身**禁止**入 metric label 与日志（敏感，高基数）
