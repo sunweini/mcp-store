@@ -17,7 +17,7 @@ import uuid
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from auth import require_admin
 from redis_client import get_redis
@@ -32,12 +32,14 @@ QUOTA_DEFAULTS = {"tavily": 1000, "brave": 2000, "serpapi": 100}
 
 class KeyCreate(BaseModel):
     key: str
-    monthly_quota: int | None = None
+    # ge=1：0 会触发 MCP 侧 "quota or default" 回退（key_pool.py），
+    # 存 0 会造成管理界面显示与 MCP 实际行为分裂；负数更会污染 usage ratio。
+    monthly_quota: int | None = Field(default=None, ge=1)
 
 
 class KeyUpdate(BaseModel):
     enabled: bool | None = None
-    monthly_quota: int | None = None
+    monthly_quota: int | None = Field(default=None, ge=1)
 
 
 def _now_iso() -> str:
@@ -55,10 +57,18 @@ async def _publish(action: str, provider: str, key_id: str) -> None:
 
     MCPs subscribe to search:keys:channel (keyspace semantics: full reload
     on any action) — the key_id is included for debuggability only.
+
+    Redis 主操作（hset/hdel）已成功即操作成功；publish 失败只记 warning
+    不阻断。MCP 侧只有 pubsub 订阅、无轮询兜底，丢消息只能等下次变更
+    或重启补——但绝不能让管理面操作 500，否则重试会重复建 key。
     """
-    r = get_redis()
-    await r.publish("search:keys:channel",
-                    json.dumps({"provider": provider, "action": action, "key_id": key_id}))
+    try:
+        r = get_redis()
+        await r.publish("search:keys:channel",
+                        json.dumps({"provider": provider, "action": action, "key_id": key_id}))
+    except Exception as e:
+        logger.warning("search_key_publish_failed", provider=provider, key_id=key_id,
+                       error=str(e), service="gateway-admin")
 
 
 @router.get("/{provider}")
@@ -126,7 +136,11 @@ async def update_key(provider: str, key_id: str, req: KeyUpdate,
     payload = await r.hget(f"search:keys:{provider}", key_id)
     if not payload:
         raise HTTPException(status_code=404, detail="key not found")
-    rec = json.loads(payload)
+    try:
+        rec = json.loads(payload)
+    except json.JSONDecodeError:
+        # 与 list_keys 的脏数据策略一致：损坏记录当不存在处理，不 500
+        raise HTTPException(status_code=404, detail="key not found")
     if req.enabled is not None:
         rec["enabled"] = req.enabled
     if req.monthly_quota is not None:

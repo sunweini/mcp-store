@@ -86,6 +86,52 @@ def test_add_key_success(client, fake_redis, auth_headers, monkeypatch):
     assert rec["key_masked"] == "tvly…"  # len("tvly-xyz")<=12 -> 仅前4+省略号
 
 
+def test_publish_failure_does_not_block_write(client, fake_redis, auth_headers, monkeypatch):
+    """publish 失败只记 warning：Redis 已写入是主操作，通知是尽力而为。
+
+    阻断会让前端看到 500 而重试 → 重复建 key（数据已在库）。
+    只让 redis.publish 抛错、保留真实 _publish 的 try/except 在链路上，
+    验证的是真实错误处理路径（monkeypatch 整个 _publish 会连兜底一起换掉）。
+    """
+    from api import keys as keys_module
+
+    async def boom_publish(*a, **kw):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(fake_redis, "publish", boom_publish)
+    monkeypatch.setattr(keys_module, "_probe_key", _fake_probe({"ok": True}))
+    resp = client.post(
+        "/api/search-keys/tavily",
+        json={"key": "tvly-xyz"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201
+    key_id = resp.json()["key_id"]
+    assert key_id.startswith("tavily_")
+
+    # 同样的 publish 故障下 PUT 也成功
+    resp = client.put(
+        f"/api/search-keys/tavily/{key_id}",
+        json={"enabled": False},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200
+    assert resp.json()["enabled"] is False
+
+
+def test_publish_failure_does_not_block_delete(client, fake_redis, auth_headers, monkeypatch):
+    from api import keys as keys_module
+
+    async def boom_publish(*a, **kw):
+        raise RuntimeError("redis down")
+
+    monkeypatch.setattr(fake_redis, "publish", boom_publish)
+    _seed(fake_redis)
+    resp = client.delete("/api/search-keys/tavily/k1", headers=auth_headers)
+    assert resp.status_code == 204
+    assert not asyncio.run(fake_redis.hexists("search:keys:tavily", "k1"))
+
+
 def test_list_keys_masks_plaintext(client, fake_redis, auth_headers):
     _seed(fake_redis)
     resp = client.get("/api/search-keys/tavily", headers=auth_headers)
@@ -126,6 +172,26 @@ def test_add_key_blank_rejected(client, fake_redis, auth_headers, monkeypatch):
     assert resp.status_code == 422
 
 
+def test_add_key_zero_quota_rejected(client, fake_redis, auth_headers, monkeypatch):
+    """quota=0 会被 MCP 侧回退成默认值（0/缺失语义一致），拒绝以免
+    管理界面显示与 MCP 实际行为分裂；负数同理（Field ge=1 拒绝）。"""
+    from api import keys as keys_module
+
+    monkeypatch.setattr(keys_module, "_probe_key", _fake_probe({"ok": True}))
+    resp = client.post(
+        "/api/search-keys/tavily",
+        json={"key": "tvly-xyz", "monthly_quota": 0},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+    resp = client.post(
+        "/api/search-keys/tavily",
+        json={"key": "tvly-xyz", "monthly_quota": -5},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+
+
 def test_update_key(client, fake_redis, auth_headers, monkeypatch):
     from api import keys as keys_module
 
@@ -148,6 +214,18 @@ def test_update_key(client, fake_redis, auth_headers, monkeypatch):
 def test_update_key_not_found(client, fake_redis, auth_headers):
     resp = client.put(
         "/api/search-keys/tavily/ghost",
+        json={"enabled": False},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 404
+
+
+def test_update_key_corrupt_payload_404(client, fake_redis, auth_headers):
+    """损坏 payload 当不存在处理（与 list 的脏数据策略一致），不 500。"""
+    _seed(fake_redis)
+    asyncio.run(fake_redis.hset("search:keys:tavily", "k1", "{not-json"))
+    resp = client.put(
+        "/api/search-keys/tavily/k1",
         json={"enabled": False},
         headers=auth_headers,
     )
@@ -308,4 +386,10 @@ def _fake_probe(result):
 def _record(calls):
     async def publish(action, provider, key_id):
         calls.append((action, provider, key_id))
+    return publish
+
+
+def _raise(exc):
+    async def publish(action, provider, key_id):
+        raise exc
     return publish
