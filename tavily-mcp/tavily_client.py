@@ -75,9 +75,26 @@ class TavilyClient:
         return await self._post("research", params)
 
     async def usage(self) -> dict:
-        resp = await self._http.get(f"{API_BASE}/usage")
-        resp.raise_for_status()
-        return resp.json()
+        # usage 返回的 remaining 是更新 key 配额的数据源，其 401/403/429
+        # 同样应可被 classify_error 识别（剔除/冷却 key），故错误统一走
+        # TavilyError 而非裸 raise_for_status（HTTPStatusError 无顶层
+        # status_code，分类路径会漏掉它）
+        with tracer.start_as_current_span("tavily_client.usage") as span:
+            span.set_attributes({"http.method": "GET", "http.url": f"{API_BASE}/usage"})
+            start = time.monotonic()
+            resp = await self._http.get(f"{API_BASE}/usage")
+            duration = time.monotonic() - start
+            span.set_attribute("http.status_code", resp.status_code)
+            if resp.status_code >= 400:
+                span.set_status(Status(StatusCode.ERROR, f"tavily {resp.status_code}"))
+                logger.error("tavily_api_error",
+                             service="tavily-mcp",
+                             endpoint="usage",
+                             http_status=resp.status_code,
+                             error=resp.text[:200],
+                             duration_ms=round(duration * 1000))
+                raise TavilyError(resp.status_code, resp.text[:200])
+            return resp.json()
 
     async def _post(self, endpoint: str, params: dict) -> dict:
         with tracer.start_as_current_span(f"tavily_client.{endpoint}") as span:

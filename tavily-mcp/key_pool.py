@@ -8,6 +8,7 @@ triggers hot reload so admin edits take effect without restart.
 
 OBS: key_id 与 key 明文均不得写入日志/metrics（高基数+敏感）。
 """
+import asyncio
 import calendar
 import json
 import time
@@ -55,12 +56,25 @@ class KeyPool:
         self._records: dict[str, dict] = {}
         self._key_hash: dict[str, str] = {}  # key → key_id (decorrelation)
         self._pool_key = f"search:keys:{provider}"
+        # 持有监听任务引用防 GC（3.12 对无引用任务有销毁告警）；
+        # done_callback 记录异常退出，重启策略由 Task 2 server 层决定
+        self._listen_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         await self.reload()
         # Subscribe in a background task; messages trigger reload().
-        import asyncio
-        asyncio.create_task(self._listen())
+        self._listen_task = asyncio.create_task(self._listen())
+        self._listen_task.add_done_callback(self._on_listen_exit)
+
+    def _on_listen_exit(self, task: asyncio.Task) -> None:
+        # 监听任务异常退出时记录（不重启，保留现场供 server 层决策；
+        # _listen 自身已捕获单次故障，走到这里说明 pubsub 长期不可用）
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                logger.error("key_pool_listener_stopped",
+                             provider=self.provider,
+                             error=type(exc).__name__)
 
     async def _listen(self) -> None:
         while True:
@@ -69,7 +83,10 @@ class KeyPool:
                 if msg and msg.get("type") == "message":
                     await self.reload()
             except Exception:
-                # Redis 短暂故障不致命 — 保留现有池，等待下次通知
+                # Redis 短暂故障不致命 — 保留现有池，等待下次通知；
+                # 有日志便于排障（热更新静默失效是最难查的问题之一）
+                logger.warning("key_pool_listen_retry",
+                               provider=self.provider, error="pubsub_error")
                 await asyncio.sleep(5)
 
     async def reload(self) -> None:
@@ -106,9 +123,16 @@ class KeyPool:
                 continue
             if rec.get("status") == "cooldown":
                 until = rec.get("cooldown_until")
-                if until and _parse_iso(until) > now:
-                    unavailable.append(rec)
-                    continue
+                if until:
+                    try:
+                        cooldown_active = _parse_iso(until) > now
+                    except (ValueError, TypeError):
+                        # 畸形 cooldown_until（管理端脏数据）：按已过期处理，
+                        # 避免脏数据导致 key 永久不可用，也不向工具层冒泡
+                        cooldown_active = False
+                    if cooldown_active:
+                        unavailable.append(rec)
+                        continue
                 rec["status"] = "active"
                 rec["cooldown_until"] = None
             ratio = self._ratio(rec)

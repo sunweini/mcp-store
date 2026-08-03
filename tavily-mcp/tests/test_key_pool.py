@@ -18,7 +18,14 @@ def _rec(key_id, key, **over):
 
 
 class FakeRedis:
-    """Minimal async Redis fake with the methods KeyPool uses."""
+    """Minimal async Redis fake with the methods KeyPool uses.
+
+    Key-space: _records 支持两种形态——
+    - 扁平 {field: value}（brief 测试预置/reload 测试直接写入）
+    - 按 hash 名隔离 {hash_name: {field: value}}（hset 写回的真实形态）
+    hgetall(name) 优先返回 name 名下字段；无则退回扁平形态，
+    与真实 Redis 的 hash 语义一致（各 key 空间互不干扰）。
+    """
 
     def __init__(self, records: dict[str, str]):
         self._records = dict(records)
@@ -26,15 +33,33 @@ class FakeRedis:
         self.zadd_calls = []
         self.expire_calls = []
 
+    def _fields_of(self, name: str) -> dict:
+        owned = self._records.get(name)
+        if isinstance(owned, dict):
+            # 专属空间（hset 写回）优先；扁平预置的其余字段合并进来，
+            # 保证「预置 k1/k2 + 写回」混合场景 reload 后字段完整
+            merged = dict(self._records)
+            merged.pop(name, None)
+            merged.update(owned)
+            return merged
+        return self._records  # 扁平预置形态：name 无专属空间
+
     async def hgetall(self, name):
-        return dict(self._records)
+        return dict(self._fields_of(name))
 
     async def hset(self, name, key=None, value=None, mapping=None):
         # 镜像 redis.asyncio.Redis.hset：支持 hset(name, key, value)
-        # 与 hset(name, mapping={...}) 两种调用形态
+        # 与 hset(name, mapping={...}) 两种调用形态；按 field 合并写入
+        # 哈希（同 field 覆盖、异 field 保留），值序列化为 JSON 字符串
+        # ——与真实 Redis（decode_responses=True 返回字符串）一致
         if mapping is None:
             mapping = {key: value}
-        self._records[name] = mapping
+        existing = self._records.get(name)
+        if not isinstance(existing, dict):
+            existing = {}
+            self._records[name] = existing
+        for field, val in mapping.items():
+            existing[field] = val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
         self.hset_calls.append((name, mapping))
         return 1
 
@@ -151,3 +176,59 @@ async def test_reload_refreshes_records(pool):
     fake_redis._records["k3"] = _rec("k3", "tvly-c")
     await pool_.reload()
     assert "k3" in pool_._records
+
+
+async def test_on_error_writes_back_to_redis(pool):
+    """错误状态必须持久化：写回 Redis 后 reload 仍能看到新状态。"""
+    pool_, fake_redis = pool
+    await pool_.on_error("k1", ErrorKind.INVALID)
+    assert any(name == pool_._pool_key for name, _ in fake_redis.hset_calls)
+    await pool_.reload()
+    assert pool_._records["k1"]["status"] == "invalid"
+
+
+async def test_on_error_invalid_survives_reload(pool):
+    """Redis 往返：reload 后 next_key 仍跳过 invalid 的 key。"""
+    pool_, _ = pool
+    await pool_.on_error("k1", ErrorKind.INVALID)
+    await pool_.reload()
+    key = await pool_.next_key()
+    assert key is not None and key["key"] == "tvly-b"
+
+
+async def test_on_success_writes_back_to_redis(pool):
+    """成功路径同样持久化 remaining/status 回 Redis。"""
+    pool_, fake_redis = pool
+    await pool_.on_success("k1", remaining=890)
+    assert any(name == pool_._pool_key for name, _ in fake_redis.hset_calls)
+    await pool_.reload()
+    assert pool_._records["k1"]["remaining"] == 890
+    assert pool_._records["k1"]["status"] == "active"
+
+
+async def test_listen_survives_pubsub_error(pool):
+    """pubsub 故障不崩溃：get_message 抛异常后监听循环继续（I-1 回归）。"""
+    import asyncio
+
+    pool_, _ = pool
+
+    class FlakyPubSub:
+        def __init__(self):
+            self.calls = 0
+
+        async def get_message(self, ignore_subscribe=True, timeout=30):
+            self.calls += 1
+            if self.calls == 1:
+                raise ConnectionError("redis down")
+            return None  # 无消息 → 循环继续
+
+    pool_._pubsub = FlakyPubSub()
+    await pool_.start()
+    await asyncio.sleep(0.2)
+    # 第一次调用抛异常后监听循环必须仍存活（原 bug：NameError 使任务
+    # 崩溃完成）；0.2s 内第二次调用（5s 后）尚未发生，故不数 calls
+    assert not pool_._listen_task.done()
+    assert pool_._pubsub.calls == 1
+    pool_._listen_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pool_._listen_task
