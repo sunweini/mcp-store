@@ -26,14 +26,16 @@
 
 ```
 MCP Client → gateway-proxy:8082
-                  ├→ tavily-mcp   (:8001)  tavily_search / extract / crawl / map / research
-                  ├→ brave-mcp    (:8002)  brave_web_search / brave_local_search
-                  └→ serpapi-mcp  (:8003)  serpapi_google / bing / baidu / duckduckgo / ebay
-                        ↑ 注册/探活/转发
+                  ├→ tavily-mcp   (容器内 :8001)  tavily_search / extract / crawl / map / research
+                  ├→ brave-mcp    (容器内 :8002)  brave_web_search / brave_local_search
+                  └→ serpapi-mcp  (容器内 :8003)  serpapi_google / bing / baidu / duckduckgo / ebay
+                        ↑ 注册/探活/转发（proxy 经容器名+容器内端口互访）
         gateway-admin:8081 (新增 API Keys 管理模块)
                         ↑ 读写
                     Redis (key 池 + 健康状态 + 用量)
 ```
+
+端口策略：3 个新 server **只占容器内端口（8001/8002/8003），不映射宿主端口**——与 zabbix-mcp（容器内 8000）同一模式，减少攻击面，且不与宿主任何端口冲突。本地非容器开发时各起各端口。
 
 ### 组件清单
 
@@ -197,7 +199,7 @@ gateway-admin 现有 Vue3 前端加 "API Keys" 菜单页：
 
 ## 部署
 
-- 3 个新 server 加入 `deploy/docker-compose.yml`（内部端口 8001/8002/8003，不对外），Dockerfile 复用 base。
+- 3 个新 server 加入 `deploy/docker-compose.yml`（**容器内端口 8001/8002/8003，不映射宿主端口**，与 zabbix-mcp 同模式），Dockerfile 复用 base。
 - `init.sh` 扩展：注册 3 个 server 到 gateway + 探活。
 - key 管理全部走前台，容器内不配 key env（源 server 启动时从 Redis 拉取）。
 
