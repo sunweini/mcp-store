@@ -115,6 +115,9 @@ MCP Client → gateway-proxy:8080 → [zabbix-mcp:8000, github-mcp:8001, ...]
 | 目录 | 名称 | 说明 | 状态 |
 |---|---|---|---|
 | `zabbix-mcp/` | Zabbix MCP | Zabbix 告警巡检/维护期/告警确认（8 tools） | ✅ 开发完成 |
+| `tavily-mcp/` | Tavily MCP | Tavily 搜索（search/extract/crawl/map/research 5 tools） | ✅ 开发完成 |
+| `brave-mcp/` | Brave MCP | Brave 搜索（web/local 2 tools） | ✅ 开发完成 |
+| `serpapi-mcp/` | SerpAPI MCP | SerpAPI 搜索（google/bing/baidu/duckduckgo/ebay 5 engines） | ✅ 开发完成 |
 
 ## 知识库（开发必读）
 
