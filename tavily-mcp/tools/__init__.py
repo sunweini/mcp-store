@@ -1,0 +1,44 @@
+"""Tool registration — mirrors zabbix-mcp pattern."""
+import time
+import functools
+
+from tools import search
+
+try:
+    from telemetry import (SEARCH_REQUESTS_TOTAL, SEARCH_REQUEST_DURATION,
+                           SEARCH_KEY_INVALID_TOTAL)
+except ImportError:
+    SEARCH_REQUESTS_TOTAL = SEARCH_REQUEST_DURATION = SEARCH_KEY_INVALID_TOTAL = None
+
+
+def _metrics_wrapper(tool_name: str):
+    """Record search_requests_total / duration / invalid counter.
+
+    OBS-CORE-003: label 只含 provider/engine/status —— 低基数,无 key 维度。
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            start = time.monotonic()
+            try:
+                result = await func(*args, **kwargs)
+                if SEARCH_REQUESTS_TOTAL:
+                    status = "success" if result.get("status") == "ok" else "error"
+                    SEARCH_REQUESTS_TOTAL.add(
+                        1, attributes={"provider": "tavily", "engine": tool_name, "status": status})
+                return result
+            except Exception:
+                if SEARCH_REQUESTS_TOTAL:
+                    SEARCH_REQUESTS_TOTAL.add(
+                        1, attributes={"provider": "tavily", "engine": tool_name, "status": "error"})
+                raise
+            finally:
+                duration = time.monotonic() - start
+                if SEARCH_REQUEST_DURATION:
+                    SEARCH_REQUEST_DURATION.record(duration, attributes={"provider": "tavily", "engine": tool_name})
+        return wrapper
+    return decorator
+
+
+def register_tools(mcp, get_pool) -> None:
+    search.register(mcp, get_pool, metrics=_metrics_wrapper)

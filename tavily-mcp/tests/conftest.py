@@ -43,3 +43,81 @@ class MockTransportFactory:
 @pytest.fixture
 def mock_transport():
     return MockTransportFactory()
+
+
+class FakeRedis:
+    """Minimal async Redis fake with the methods KeyPool uses.
+
+    Key-space: _records 支持两种形态——
+    - 扁平 {field: value}（brief 测试预置/reload 测试直接写入）
+    - 按 hash 名隔离 {hash_name: {field: value}}（hset 写回的真实形态）
+    hgetall(name) 优先返回 name 名下字段；无则退回扁平形态，
+    与真实 Redis 的 hash 语义一致（各 key 空间互不干扰）。
+    """
+
+    def __init__(self, records: dict[str, str]):
+        self._records = dict(records)
+        self.hset_calls = []
+        self.zadd_calls = []
+        self.expire_calls = []
+
+    def _fields_of(self, name: str) -> dict:
+        owned = self._records.get(name)
+        if isinstance(owned, dict):
+            # 专属空间（hset 写回）优先；扁平预置的其余字段合并进来，
+            # 保证「预置 k1/k2 + 写回」混合场景 reload 后字段完整
+            merged = dict(self._records)
+            merged.pop(name, None)
+            merged.update(owned)
+            return merged
+        return self._records  # 扁平预置形态：name 无专属空间
+
+    async def hgetall(self, name):
+        return dict(self._fields_of(name))
+
+    async def hset(self, name, key=None, value=None, mapping=None):
+        # 镜像 redis.asyncio.Redis.hset：支持 hset(name, key, value)
+        # 与 hset(name, mapping={...}) 两种调用形态；按 field 合并写入
+        # 哈希（同 field 覆盖、异 field 保留），值序列化为 JSON 字符串
+        # ——与真实 Redis（decode_responses=True 返回字符串）一致
+        if mapping is None:
+            mapping = {key: value}
+        existing = self._records.get(name)
+        if not isinstance(existing, dict):
+            existing = {}
+            self._records[name] = existing
+        for field, val in mapping.items():
+            existing[field] = val if isinstance(val, str) else json.dumps(val, ensure_ascii=False)
+        self.hset_calls.append((name, mapping))
+        return 1
+
+    async def zadd(self, name, mapping):
+        self.zadd_calls.append((name, mapping))
+        return 1
+
+    async def expire(self, name, seconds):
+        self.expire_calls.append((name, seconds))
+        return True
+
+
+@pytest.fixture
+async def fake_pool():
+    """App-level KeyPool fixture: real KeyPool over FakeRedis, two keys.
+
+    k1 剩余 900 > k2 剩余 800 —— next_key 默认返回 k1（与 test_key_pool
+    的挑选逻辑一致）。工具层测试以此验证 pool 集成（成功/失败记账、
+    key 失效后 failover 到 k2）。
+    """
+    records = {
+        "k1": json.dumps({"key": "tvly-a", "provider": "tavily", "enabled": True,
+                          "monthly_quota": 1000, "status": "active",
+                          "cooldown_until": None, "remaining": 900, "last_error": None}),
+        "k2": json.dumps({"key": "tvly-b", "provider": "tavily", "enabled": True,
+                          "monthly_quota": 1000, "status": "active",
+                          "cooldown_until": None, "remaining": 800, "last_error": None}),
+    }
+    fake_redis = FakeRedis(records)
+    from unittest.mock import AsyncMock
+    pool = KeyPool("tavily", fake_redis, AsyncMock(), quota_default=1000)
+    await pool.reload()
+    return pool
