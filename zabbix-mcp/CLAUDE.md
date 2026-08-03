@@ -32,7 +32,7 @@ uv run pytest tests/ -v
 | `ZABBIX_TOKEN` | 无（必填） | API Token |
 | `ZABBIX_TIMEOUT` | `30` | HTTP 超时秒数 |
 | `MCP_HOST` | `127.0.0.1` | MCP server 监听地址 |
-| `MCP_PORT` | `8000` | MCP server 监听端口 |
+| `MCP_PORT` | `9053` | MCP server 监听端口（仓库规范 9050-9500，见根 CLAUDE.md；2026-08-03 自 8000 迁入） |
 | `LOG_FORMAT` | `console` | `console`（开发）/ `json`（生产） |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | 无 | OTLP collector URL（如 `http://localhost:4317`） |
 | `OTEL_SERVICE_NAME` | `zabbix-mcp` | 服务名（trace/metrics label） |

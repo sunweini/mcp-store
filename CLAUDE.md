@@ -95,6 +95,21 @@ MCP Client → gateway-proxy:8080 → [zabbix-mcp:8000, github-mcp:8001, ...]
 - **传输协议**: Streamable HTTP，stateless 模式优先
 - **代码风格**: 注释写"为什么"不写"做了什么"
 
+## 端口规范
+
+**MCP server 容器内端口统一分配 9050-9500**，新增 MCP 前先在此登记。
+
+| 端口 | 服务 | 说明 |
+|---|---|---|
+| 9050 | tavily-mcp | 搜索源（5 tools） |
+| 9051 | brave-mcp | 搜索源（2 tools） |
+| 9052 | serpapi-mcp | 搜索源（5 engines） |
+| 9053 | zabbix-mcp | 告警巡检（8 tools） |
+
+- MCP server 容器内端口**不映射宿主端口**（与 gateway-proxy 8082 / gateway-admin 8081 分离，减少攻击面）
+- 新增 MCP：从 9050-9500 取最小未用端口，登记本表 + 更新 compose
+- 本地非容器开发时按表使用对应本地端口
+
 ## 已开发 MCP
 
 | 目录 | 名称 | 说明 | 状态 |

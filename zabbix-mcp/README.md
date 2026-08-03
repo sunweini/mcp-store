@@ -23,7 +23,7 @@ Zabbix 监控系统的 MCP server，为 AI agent 提供告警巡检、维护期�
 {
   "mcpServers": {
     "zabbix": {
-      "url": "http://localhost:8000/mcp"
+      "url": "http://localhost:9053/mcp"
     }
   }
 }

@@ -43,7 +43,7 @@ CMD ["uv", "run", "python", "server.py"]
 ## 健康检查
 
 ```bash
-curl -X POST http://<host>:8000/mcp \
+curl -X POST http://<host>:9053/mcp \
   -H "MCP-Protocol-Version: 2026-07-28" \
   -H "Mcp-Method: tools/list" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"health","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}'
