@@ -19,6 +19,13 @@ class FakeClient:
         self.fail = fail
         self.fail_status = fail_status
         self.calls = []
+        self.closed = 0
+
+    async def close(self):
+        # 镜像真实 TavilyClient.close()（异步关闭 httpx.AsyncClient）。
+        # 回归点：关闭方法名是 close 而非 aclose——写错则 _once 的
+        # getattr 恒为 None、连接泄漏依旧且无测试能发现
+        self.closed += 1
 
     async def search(self, params):
         return await self._hit("search", params, {"results": [{"title": "t", "url": "u"}]})
@@ -47,7 +54,8 @@ class FakePool:
 
     next_key 跳过 invalid/exhausted;on_error 按 kind 标记 key,
     使 failover 场景 next_key 自然轮换到下一个可用 key。
-    _records 属性名与 KeyPool 一致(工具层重试判空依赖)。
+    _records 仅作数据存储（I1 后工具层不再依赖它判空，重试可行性
+    完全由 next_key 语义承载）。
     """
 
     def __init__(self, records=None):
@@ -113,6 +121,7 @@ async def test_tavily_search_passes_params():
     })]
     assert made[0].timeout == 5.0
     assert pool.successes == ["k1"]
+    assert made[0].closed == 1  # 每个 client 用完即关（N1：close 非 aclose）
 
 
 async def test_tavily_search_invalid_params_returns_error():
@@ -280,6 +289,32 @@ async def test_rate_limit_does_not_retry_same_key():
     assert result["status"] == "error"
     assert pool.errors == [("k1", ErrorKind.RATE_LIMIT)]
     assert len(made) == 1
+
+
+async def test_clients_closed_on_success_fail_and_failover():
+    """每个创建的 client 都必须关闭（N1 回归：关闭方法名是 close 不是
+    aclose——上轮错写 aclose 导致 getattr 恒为 None，连接泄漏无感知）。"""
+    pool = FakePool(records={"k1": _rec("k1", "tvly-k1"), "k2": _rec("k2", "tvly-k2")})
+    made = []
+
+    # 成功路径
+    await tavily_search("q", pool=FakePool(), client_factory=_client_factory(made))
+    assert made[-1].closed == 1
+
+    # 失败路径（无重试，crawl 不重试）
+    pool2 = FakePool(records={"k1": _rec("k1", "tvly-k1")})
+    made2 = []
+    await tavily_crawl(["https://a"], pool=pool2,
+                       client_factory=_client_factory(made2, fail="crawl"))
+    assert made2[0].closed == 1
+
+    # failover 路径（k1 失败 → k2 成功，两个 client 都要关）
+    pool3 = FakePool(records={"k1": _rec("k1", "tvly-k1"), "k2": _rec("k2", "tvly-k2")})
+    made3 = []
+    await tavily_search("q", pool=pool3,
+                        client_factory=_client_factory(made3, fail="search",
+                                                       fail_once=True))
+    assert [c.closed for c in made3] == [1, 1]
 
 
 # ── MCP 注册 ────────────────────────────────────────────────────────────────

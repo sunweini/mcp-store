@@ -11,8 +11,10 @@ except ImportError:
 
 
 def _metrics_wrapper(tool_name: str):
-    """Record search_requests_total / duration / invalid counter.
+    """Record search_requests_total / duration（工具层只打这两个指标）。
 
+    key 失效计数（search_key_invalid_total）由池层记账，工具层不感知，
+    故此处不记录（评审 M1：死导入已删）。
     OBS-CORE-003: label 只含 provider/engine/status —— 低基数,无 key 维度。
     """
     def decorator(func):

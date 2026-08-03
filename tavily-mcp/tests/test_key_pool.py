@@ -216,7 +216,9 @@ async def test_listen_survives_pubsub_error(pool):
         def __init__(self):
             self.calls = 0
 
-        async def get_message(self, ignore_subscribe=True, timeout=30):
+        # 签名与真实 redis-py 8.1.0 一致（ignore_subscribe_messages，
+        # 无旧名参数——回归点与 test_listen_ignores_... 相同）
+        async def get_message(self, ignore_subscribe_messages=False, timeout=30):
             self.calls += 1
             if self.calls == 1:
                 raise ConnectionError("redis down")

@@ -68,8 +68,11 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
     async def _once(rec: dict) -> tuple:
         """Single attempt: returns (resp, exc); resp None on failure.
 
-        finally 里 aclose：真实 TavilyClient 每次调用新建 httpx.AsyncClient，
-        用完即关防连接泄漏（FakeClient 无 aclose，getattr 兜底跳过）。
+        finally 里 close：真实 TavilyClient 每次调用新建 httpx.AsyncClient，
+        用完即关防连接泄漏。关闭方法名是 close()——aclose 是 httpx.
+        AsyncClient 的方法，TavilyClient 上不存在（上轮错写 aclose，
+        导致 getattr 恒为 None、关闭从未执行，连接泄漏依旧）。FakeClient
+        无 close 时 getattr 兜底跳过。
         """
         client = factory(rec["key"], timeout)
         try:
@@ -80,10 +83,10 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
         except Exception as exc:
             return None, exc
         finally:
-            close = getattr(client, "aclose", None)
-            if close is not None:
+            closer = getattr(client, "close", None)
+            if closer is not None:
                 try:
-                    await close()
+                    await closer()
                 except Exception:
                     pass
 
