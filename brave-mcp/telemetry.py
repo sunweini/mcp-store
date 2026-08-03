@@ -2,9 +2,9 @@
 
 镜像 zabbix-mcp/telemetry.py；指标按 spec 可观测性节：
 - SEARCH_REQUESTS_TOTAL{provider, engine, status} — status 低基数: success/error
-- SEARCH_QUOTA_REMAINING{provider} — 池内最低剩余
-- SEARCH_QUOTA_RATIO{provider, level} — warning<10%/critical<5%/exhausted=0（按 provider 聚合，无 key label）
-- SEARCH_KEY_POOL_SIZE{provider}, SEARCH_KEY_INVALID_TOTAL{provider}
+- SEARCH_QUOTA_REMAINING{provider} — 池内最低剩余（gauge，当前值）
+- SEARCH_QUOTA_RATIO{provider, level} — warning<10%/critical<5%/exhausted=0（按 provider 聚合，无 key label；gauge，0=档位当前不成立）
+- SEARCH_KEY_POOL_SIZE{provider}, SEARCH_KEY_INVALID_TOTAL{provider}（gauge，当前值）
 - SEARCH_REQUEST_DURATION histogram — bucket 对齐 SLO: 0.1/0.5/1/3/5
 
 OBS: key_id / 明文 key 不得进入 metric label（高基数+敏感，OBS-CORE-003）。
@@ -57,10 +57,14 @@ def record_quota_metrics(provider: str, snapshot: dict) -> None:
     - lowest_ratio < 10% → warning
     无任何可计算 ratio 的 key 时只发 pool_size/invalid（不编造 level）。
 
-    用 up_down_counter 的理由：ratio 档位会在 warning → critical → 正常 之间
-    反复横跳（配额变化/补 key），counter 绝对值无意义，需要的是「当前档位」
-    这种可升降的状态——up_down_counter 语义正好（set 由 add 差量模拟，
-    详见下方注释）。
+    用 gauge（create_gauge + set）而非 counter/up_down_counter 的理由：
+    ratio 档位会在 warning → critical → 正常 之间反复横跳（配额变化/补
+    key），需要的是「当前档位」这种可升降的状态；OTel SDK 对 counter 与
+    up_down_counter 的聚合都是累计 sum（PrometheusMetricReader 只改变
+    暴露类型，不改变语义），add(绝对值) 会随每次 reload 单调累加、数值
+    失真，且档位恢复后无法归零——告警永不恢复。gauge 的 set 语义就是
+    「当前值」，每次 reload/on_error 后 set 一次即覆盖旧值（实测：
+    set(800); set(700) 导出 700，非 1500）。
     """
     metrics_set = {
         SEARCH_QUOTA_REMAINING, SEARCH_QUOTA_RATIO,
@@ -72,17 +76,14 @@ def record_quota_metrics(provider: str, snapshot: dict) -> None:
         return
 
     if SEARCH_KEY_POOL_SIZE:
-        SEARCH_KEY_POOL_SIZE.add(snapshot["pool_size"], attributes={"provider": provider})
+        SEARCH_KEY_POOL_SIZE.set(snapshot["pool_size"], attributes={"provider": provider})
     if SEARCH_KEY_INVALID_TOTAL:
-        SEARCH_KEY_INVALID_TOTAL.add(snapshot["invalid_count"], attributes={"provider": provider})
+        SEARCH_KEY_INVALID_TOTAL.set(snapshot["invalid_count"], attributes={"provider": provider})
     if SEARCH_QUOTA_REMAINING:
         lowest = snapshot["lowest_remaining"]
         if lowest is not None:
-            SEARCH_QUOTA_REMAINING.add(lowest, attributes={"provider": provider})
+            SEARCH_QUOTA_REMAINING.set(lowest, attributes={"provider": provider})
 
-    # up_down_counter 的 add(absolute) 语义：prometheus_exporter 对
-    # up_down_counter 的 add(v) 直接 set 为 v（counter 才做累加）——
-    # 这里传入的是绝对档位值而非增量，见下注释。
     level = None
     if snapshot.get("lowest_ratio") is not None:
         if snapshot["lowest_ratio"] <= 0:
@@ -95,8 +96,13 @@ def record_quota_metrics(provider: str, snapshot: dict) -> None:
     # 未知 key 不触发阈值），但剩余为 0 应视为耗尽——两处数据同源冗余兜底
     if level is None and snapshot.get("lowest_remaining") == 0:
         level = QUOTA_LEVEL_EXHAUSTED
-    if level is not None and SEARCH_QUOTA_RATIO:
-        SEARCH_QUOTA_RATIO.add(1, attributes={"provider": provider, "level": level})
+    # 档位 gauge 写 1/0：1 = 该档位当前成立（触发告警），0 = 已恢复——
+    # 恢复时显式归零保证告警可自动恢复（累计语义下无法归零，见上注释）
+    for candidate in (QUOTA_LEVEL_EXHAUSTED, QUOTA_LEVEL_CRITICAL, QUOTA_LEVEL_WARNING):
+        if SEARCH_QUOTA_RATIO:
+            SEARCH_QUOTA_RATIO.set(
+                1 if candidate == level else 0,
+                attributes={"provider": provider, "level": candidate})
 
 
 def init_telemetry(service_name: str) -> None:
@@ -141,13 +147,13 @@ def init_telemetry(service_name: str) -> None:
 
         SEARCH_REQUESTS_TOTAL = meter.create_counter(
             "search_requests_total", unit="1", description="Search requests by provider/engine/status")
-        SEARCH_QUOTA_REMAINING = meter.create_up_down_counter(
+        SEARCH_QUOTA_REMAINING = meter.create_gauge(
             "search_quota_remaining", unit="1", description="Lowest remaining quota in pool (provider)")
-        SEARCH_QUOTA_RATIO = meter.create_up_down_counter(
+        SEARCH_QUOTA_RATIO = meter.create_gauge(
             "search_quota_ratio", unit="1", description="Quota ratio bucket by provider (warning/critical/exhausted)")
-        SEARCH_KEY_POOL_SIZE = meter.create_up_down_counter(
+        SEARCH_KEY_POOL_SIZE = meter.create_gauge(
             "search_key_pool_size", unit="1", description="Active keys in pool (provider)")
-        SEARCH_KEY_INVALID_TOTAL = meter.create_counter(
+        SEARCH_KEY_INVALID_TOTAL = meter.create_gauge(
             "search_key_invalid_total", unit="1", description="Keys marked invalid (provider)")
         SEARCH_REQUEST_DURATION = meter.create_histogram(
             "search_request_duration_seconds", unit="s",
