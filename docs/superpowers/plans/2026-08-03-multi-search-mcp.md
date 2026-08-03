@@ -1604,12 +1604,6 @@ def test_add_key_success(admin_token):
         "monthly_quota": 1000, "status": "active", "cooldown_until": None,
         "remaining": 1000, "last_used_at": None, "last_error": None,
     }))
-    r.delete("search:keys:tavily")
-    r.hset(f"search:keys:tavily", key_id, json.dumps({
-        "key": "tvly-test", "provider": "tavily", "enabled": True,
-        "monthly_quota": 1000, "status": "active", "cooldown_until": None,
-        "remaining": 1000, "last_used_at": None, "last_error": None,
-    }))
     resp = TestClient(app).get("/api/search-keys/tavily", headers=auth(admin_token))
     assert resp.status_code == 200
     assert len(resp.json()) == 1
@@ -1844,7 +1838,8 @@ async def _probe_key(provider: str, key: str) -> dict:
                 resp = await c.get("https://serpapi.com/search.json",
                                    params={"engine": "google", "q": "ping",
                                            "api_key": key, "num": 1})
-            if resp.status_code == 200 and "error" not in resp.json():
+            body = resp.json() if resp.content else {}
+            if resp.status_code == 200 and "error" not in body:
                 return {"ok": True, "remaining": None}
             return {"ok": False, "error": f"serpapi probe HTTP {resp.status_code}: {resp.text[:120]}"}
     except Exception as e:
