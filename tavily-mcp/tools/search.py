@@ -21,13 +21,22 @@ from tavily_client import TavilyClient, classify_error
 
 logger = structlog.get_logger()
 
-# 幂等轻查询自动重试；crawl/research 长任务不重试（spec 错误处理节）
-RETRYABLE = {"tavily_search", "tavily_extract", "tavily_map"}
-NO_RETRY = {"tavily_crawl", "tavily_research"}
-
 # 长任务超时：research 一轮 gather 可达分钟级,5s 默认超时会误杀
 LONG_TASK_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 5.0
+
+# 单一来源：工具名 → endpoint/超时/重试策略。endpoint 即 TavilyClient
+# 公开方法名（search/extract/crawl/map/research）；超时区分长任务（60s）
+# 与轻查询（5s）；重试仅幂等操作允许（spec 错误处理节）。曾有三套平行
+# 映射（RETRYABLE/NO_RETRY 按工具名 + endpoint 名），改动需同步多处，
+# 现收敛为一张表——新增/调整工具的唯一切入点（I3）。
+TOOLS: dict[str, dict] = {
+    "tavily_search": {"endpoint": "search", "timeout": DEFAULT_TIMEOUT, "retryable": True},
+    "tavily_extract": {"endpoint": "extract", "timeout": DEFAULT_TIMEOUT, "retryable": True},
+    "tavily_map": {"endpoint": "map", "timeout": DEFAULT_TIMEOUT, "retryable": True},
+    "tavily_crawl": {"endpoint": "crawl", "timeout": LONG_TASK_TIMEOUT, "retryable": False},
+    "tavily_research": {"endpoint": "research", "timeout": LONG_TASK_TIMEOUT, "retryable": False},
+}
 
 # client_factory(key, timeout) -> TavilyClient 兼容对象(公开方法 search/
 # extract/crawl/map/research)。默认造真实 client;测试注入 FakeClient。
@@ -38,27 +47,45 @@ def _default_factory(key: str, timeout: float) -> TavilyClient:
     return TavilyClient(key, timeout=timeout)
 
 
-async def _call_with_pool(pool, tool_name: str, endpoint: str, params: dict,
+async def _call_with_pool(pool, tool_name: str, params: dict,
                           client_factory: Optional[ClientFactory] = None) -> dict:
     """Pick key → call API → report result to pool. One retry on failover.
 
     Returns the tool response dict (status ok/error).
     client_factory: (key, timeout) -> client。默认真实 TavilyClient;
-    测试注入 FakeClient。timeout 按长任务/普通任务区分。
+    测试注入 FakeClient。timeout/endpoint/重试策略均取自 TOOLS 表。
+
+    重试可行性由 next_key() 语义承载（不触碰 pool 私有属性——I1）：
+    失败 key 已被 on_error 标记（invalid/exhausted 永久跳过、cooldown
+    冷却中），next_key 返回 None 或同一 key 即表示没有可换的 key。
     """
+    cfg = TOOLS[tool_name]
+    endpoint = cfg["endpoint"]
+    timeout = cfg["timeout"]
+    retryable = cfg["retryable"]
     factory = client_factory or _default_factory
-    timeout = LONG_TASK_TIMEOUT if tool_name in NO_RETRY else DEFAULT_TIMEOUT
 
     async def _once(rec: dict) -> tuple:
-        """Single attempt: returns (resp, exc); resp None on failure."""
+        """Single attempt: returns (resp, exc); resp None on failure.
+
+        finally 里 aclose：真实 TavilyClient 每次调用新建 httpx.AsyncClient，
+        用完即关防连接泄漏（FakeClient 无 aclose，getattr 兜底跳过）。
+        """
         client = factory(rec["key"], timeout)
         try:
-            # endpoint 来自工具层常量（非用户输入），getattr 安全；
-            # TavilyClient 方法名与 endpoint 同名（search/extract/crawl/map/research）
+            # endpoint 来自模块常量（非用户输入），getattr 安全；
+            # TavilyClient 方法名与 endpoint 同名
             resp = await getattr(client, endpoint)(params)
             return resp, None
         except Exception as exc:
             return None, exc
+        finally:
+            close = getattr(client, "aclose", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:
+                    pass
 
     key_rec = await pool.next_key()
     if key_rec is None:
@@ -70,8 +97,9 @@ async def _call_with_pool(pool, tool_name: str, endpoint: str, params: dict,
         return {"status": "ok", "data": resp}
     kind = classify_error(exc, getattr(exc, "status_code", None))
     await pool.on_error(key_rec["key_id"], kind or ErrorKind.EXHAUSTED)
-    if tool_name in RETRYABLE and pool._records:
-        # 换下一 key 重试一次（幂等操作才允许）
+    if retryable:
+        # 换下一 key 重试一次（幂等操作才允许）；next_key 已排除刚标记
+        # 失败的 key，None 或同 key 均表示无可换 key
         key_rec2 = await pool.next_key()
         if key_rec2 and key_rec2["key_id"] != key_rec["key_id"]:
             resp2, exc2 = await _once(key_rec2)
@@ -114,7 +142,7 @@ async def tavily_search(
     }
     if days is not None:
         params["days"] = days
-    return await _call_with_pool(pool, "tavily_search", "search", params,
+    return await _call_with_pool(pool, "tavily_search", params,
                                  client_factory=client_factory)
 
 
@@ -124,7 +152,7 @@ async def tavily_extract(urls: list[str], extract_depth: str = "basic", *, pool,
     if not urls:
         return {"status": "error", "message": "urls 不能为空"}
     params = {"urls": urls[:10], "extract_depth": extract_depth}
-    return await _call_with_pool(pool, "tavily_extract", "extract", params,
+    return await _call_with_pool(pool, "tavily_extract", params,
                                  client_factory=client_factory)
 
 
@@ -136,7 +164,7 @@ async def tavily_crawl(urls: list[str], max_depth: int = 3, max_pages: int = 20,
         return {"status": "error", "message": "urls 不能为空"}
     params = {"urls": urls[:5], "max_depth": max_depth,
               "max_pages": max_pages, "max_cost": max_cost}
-    return await _call_with_pool(pool, "tavily_crawl", "crawl", params,
+    return await _call_with_pool(pool, "tavily_crawl", params,
                                  client_factory=client_factory)
 
 
@@ -147,7 +175,7 @@ async def tavily_map(query: str, search_depth: str = "basic", max_results: int =
         return {"status": "error", "message": "query 不能为空"}
     params = {"query": query, "search_depth": search_depth,
               "max_results": min(max_results, 100)}
-    return await _call_with_pool(pool, "tavily_map", "map", params,
+    return await _call_with_pool(pool, "tavily_map", params,
                                  client_factory=client_factory)
 
 
@@ -159,7 +187,7 @@ async def tavily_research(query: str, max_depth: int = 3, max_learnings: int = 5
         return {"status": "error", "message": "query 不能为空"}
     params = {"query": query, "max_depth": max_depth, "max_learnings": max_learnings,
               "max_sources": max_sources, "max_browser_pages": max_browser_pages}
-    return await _call_with_pool(pool, "tavily_research", "research", params,
+    return await _call_with_pool(pool, "tavily_research", params,
                                  client_factory=client_factory)
 
 
@@ -170,6 +198,10 @@ def register(mcp: FastMCP, get_pool, metrics=None) -> None:
     不支持 *args 工具函数（ParsedFunction 校验拒绝），参数必须显式
     声明才能生成正确 inputSchema。pool/client_factory 是注入参数，
     不暴露给 MCP client（不出现在 schema）。
+
+    description 的单一来源是 mcp.tool(description=...) 的显式参数，
+    不依赖包装函数 __doc__——metrics wrapper 的 functools.wraps 会
+    覆盖 __doc__，靠它作 description 来源的顺序很脆弱（I2）。
     """
     _wrap = metrics or (lambda name: lambda f: f)
 
@@ -190,7 +222,6 @@ def register(mcp: FastMCP, get_pool, metrics=None) -> None:
                                    include_images=include_images,
                                    pool=get_pool())
 
-    _mcp_search.__doc__ = tavily_search.__doc__
     mcp.tool(
         name="tavily_search",
         description=tavily_search.__doc__,
@@ -201,7 +232,6 @@ def register(mcp: FastMCP, get_pool, metrics=None) -> None:
         return await tavily_extract(urls=urls, extract_depth=extract_depth,
                                     pool=get_pool())
 
-    _mcp_extract.__doc__ = tavily_extract.__doc__
     mcp.tool(
         name="tavily_extract",
         description=tavily_extract.__doc__,
@@ -214,7 +244,6 @@ def register(mcp: FastMCP, get_pool, metrics=None) -> None:
                                   max_pages=max_pages, max_cost=max_cost,
                                   pool=get_pool())
 
-    _mcp_crawl.__doc__ = tavily_crawl.__doc__
     mcp.tool(
         name="tavily_crawl",
         description=tavily_crawl.__doc__,
@@ -226,7 +255,6 @@ def register(mcp: FastMCP, get_pool, metrics=None) -> None:
         return await tavily_map(query=query, search_depth=search_depth,
                                 max_results=max_results, pool=get_pool())
 
-    _mcp_map.__doc__ = tavily_map.__doc__
     mcp.tool(
         name="tavily_map",
         description=tavily_map.__doc__,
@@ -241,7 +269,6 @@ def register(mcp: FastMCP, get_pool, metrics=None) -> None:
                                      max_browser_pages=max_browser_pages,
                                      pool=get_pool())
 
-    _mcp_research.__doc__ = tavily_research.__doc__
     mcp.tool(
         name="tavily_research",
         description=tavily_research.__doc__,

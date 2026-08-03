@@ -232,3 +232,46 @@ async def test_listen_survives_pubsub_error(pool):
     pool_._listen_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await pool_._listen_task
+
+
+async def test_listen_ignores_subscribe_confirm_and_reloads_on_message(pool):
+    """热更新消息接收回归：subscribe 确认消息必须被滤掉、message 触发
+    reload。曾因 get_message(ignore_subscribe=...) 参数名在 redis-py 6+
+    改名导致每次调用必 TypeError（监听静默失效），修复后不得回归。"""
+    import asyncio
+
+    pool_, fake_redis = pool
+    fake_redis._records["k3"] = _rec("k3", "tvly-c")
+
+    messages = [
+        # 模拟订阅确认消息（redis-py 8 返回 "subscribe" type）
+        {"type": "subscribe", "channel": b"search:keys:channel", "data": 1},
+        {"type": "message", "channel": b"search:keys:channel",
+         "data": b"reload"},
+        None,  # 无消息 → 循环继续
+    ]
+
+    class ScriptedPubSub:
+        def __init__(self):
+            self.calls = 0
+
+        # 签名必须与真实 redis-py 8.1.0 一致（ignore_subscribe_messages，
+        # 无旧名参数——回归点：旧实现 `ignore_subscribe=True` 在此签名
+        # 下直接 TypeError，与线上 redis-py 8 表现一致）
+        async def get_message(self, ignore_subscribe_messages=False, timeout=30):
+            # 必须让出控制权：无挂起点的协程立即返回会让 _listen 变成
+            # CPU 忙循环，测试的 sleep 永远得不到调度（实测挂起）
+            await asyncio.sleep(0)
+            self.calls += 1
+            return messages[self.calls - 1] if self.calls <= len(messages) else None
+
+    pool_._pubsub = ScriptedPubSub()
+    await pool_.start()
+    await asyncio.sleep(0.2)
+    assert not pool_._listen_task.done()  # 监听循环存活（无 TypeError 循环退出）
+    # subscribe 确认被滤掉 → 不触发 reload；message 触发 reload → k3 可见
+    assert "k3" in pool_._records
+    assert pool_._pubsub.calls >= 2
+    pool_._listen_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pool_._listen_task

@@ -58,12 +58,13 @@ def _get_pool() -> KeyPool:
 
 _configure_logging()
 
-# OTel (no-op if SDK not installed)
+# OTel (metrics 降级不应杀服务——init_telemetry 内部已是 except Exception，
+# 这里用宽异常保持对称（I4）；zabbix 无 except 直接裸导入，此处更稳)
 try:
     from telemetry import init_telemetry
     init_telemetry("tavily-mcp")
-except ImportError:
-    pass
+except Exception as exc:
+    logger.warning("telemetry_init_failed", service="tavily-mcp", error=str(exc))
 
 mcp = FastMCP(
     "Tavily MCP",
@@ -90,10 +91,21 @@ async def _start_pool_listener():
 
 if __name__ == "__main__":
     _init_pool()
-    asyncio.run(_start_pool_listener())
-    mcp.run(
-        transport="streamable-http",
-        stateless_http=True,
-        host=MCP_HOST,
-        port=MCP_PORT,
-    )
+
+    async def _run() -> None:
+        # C1 修复：listener 与 server 必须在同一 event loop。旧写法
+        # `asyncio.run(_start_pool_listener())` 先跑一个短命 loop——它
+        # 返回即关闭 loop 并 cancel 所有遗留任务（pool._listen_task 被
+        # 取消），随后 mcp.run() 在 anyio 新建的 loop 里用同一 redis
+        # 连接，跨 loop 使用直接抛 RuntimeError。现改为单 loop：
+        # _start_pool_listener 内部订阅+start 快速返回，listener 随
+        # server loop 存活。
+        await _start_pool_listener()
+        await mcp.run_async(
+            transport="streamable-http",
+            stateless_http=True,
+            host=MCP_HOST,
+            port=MCP_PORT,
+        )
+
+    asyncio.run(_run())

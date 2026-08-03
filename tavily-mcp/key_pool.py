@@ -79,7 +79,12 @@ class KeyPool:
     async def _listen(self) -> None:
         while True:
             try:
-                msg = await self._pubsub.get_message(ignore_subscribe=True, timeout=30)
+                # 不传 ignore_subscribe kwarg：redis-py 6+ 已改名
+                # ignore_subscribe_messages（旧名直接 TypeError——本机
+                # 8.1.0 实测），改名前的旧版本才认旧名。省略该参数则
+                # 各版本通用；subscribe 确认消息（type="subscribe"）由
+                # 下方 type=="message" 过滤天然排除，无需显式忽略。
+                msg = await self._pubsub.get_message(timeout=30)
                 if msg and msg.get("type") == "message":
                     await self.reload()
             except Exception:

@@ -97,7 +97,7 @@ KeyPool (Redis search:keys:tavily + pubsub 热更新) ←──────┘
 uv sync --all-extras   # 注意：必须 --all-extras，否则 venv 无 pytest
 redis-server --daemonize yes   # 需要本地 Redis 跑冒烟
 uv run python server.py        # REDIS_URL 必填
-uv run pytest tests/ -v        # 42 tests（Task 1 20 + Task 2 22）
+uv run pytest tests/ -v        # 全量测试（Task 1 + Task 2 工具层）
 ```
 
 ## 已知注意事项

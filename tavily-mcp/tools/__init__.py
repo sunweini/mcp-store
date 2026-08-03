@@ -5,10 +5,9 @@ import functools
 from tools import search
 
 try:
-    from telemetry import (SEARCH_REQUESTS_TOTAL, SEARCH_REQUEST_DURATION,
-                           SEARCH_KEY_INVALID_TOTAL)
+    from telemetry import SEARCH_REQUESTS_TOTAL, SEARCH_REQUEST_DURATION
 except ImportError:
-    SEARCH_REQUESTS_TOTAL = SEARCH_REQUEST_DURATION = SEARCH_KEY_INVALID_TOTAL = None
+    SEARCH_REQUESTS_TOTAL = SEARCH_REQUEST_DURATION = None
 
 
 def _metrics_wrapper(tool_name: str):

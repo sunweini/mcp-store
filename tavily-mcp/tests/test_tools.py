@@ -137,7 +137,8 @@ async def test_tavily_search_with_fixture_pool(fake_pool):
     result = await tavily_search("q", pool=fake_pool, client_factory=_client_factory(made))
     assert result["status"] == "ok"
     assert made[0].key == "tvly-a"  # next_key 选剩余最高的 k1
-    # on_success 持久化到 Redis hash（k1 的 remaining 更新）
+    # on_success 未传 remaining，KeyPool 保留旧值 900——断言防回归
+    # 「成功路径误改 remaining/配额」（评审 M3：断言意图在此）
     assert fake_pool._records["k1"]["remaining"] == 900
     assert fake_pool._records["k1"]["last_used_at"] is not None
     assert fake_pool._records["k1"]["last_error"] is None

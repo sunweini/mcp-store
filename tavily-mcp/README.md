@@ -43,6 +43,12 @@ export REDIS_URL="redis://localhost:6379/0"
 uv run python server.py
 ```
 
+### 运行测试
+
+```bash
+cd tavily-mcp && uv run pytest tests/ -v
+```
+
 ### Docker
 
 ```bash

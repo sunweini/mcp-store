@@ -30,6 +30,8 @@ SEARCH_KEY_POOL_SIZE = None
 SEARCH_KEY_INVALID_TOTAL = None
 SEARCH_REQUEST_DURATION = None
 
+_initialized = False
+
 
 def init_telemetry(service_name: str) -> None:
     """Initialize OTel + Prometheus metrics (same pattern as zabbix-mcp).
@@ -39,6 +41,16 @@ def init_telemetry(service_name: str) -> None:
     - OTEL_SERVICE_NAME: 覆盖默认服务名
     - PROMETHEUS_PORT: /metrics HTTP 端口（默认 9464）
     """
+    # 幂等 guard（I4）：重复调用会重复注册 meter 与 start_http_server
+    # （第二次端口占用被吞但造成双注册）。测试多次 import / 未来
+    # gateway 组合加载时都只会初始化一次。
+    # global 必须声明在赋值前（Python 语法规则），统一放函数顶部。
+    global SEARCH_REQUESTS_TOTAL, SEARCH_QUOTA_REMAINING, SEARCH_QUOTA_RATIO
+    global SEARCH_KEY_POOL_SIZE, SEARCH_KEY_INVALID_TOTAL, SEARCH_REQUEST_DURATION
+    global _initialized
+    if _initialized:
+        return
+
     resource = Resource.create({"service.name": os.environ.get("OTEL_SERVICE_NAME", service_name)})
     # Traces: OTLP exporter if configured, else ConsoleSpanExporter
     otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
@@ -61,10 +73,6 @@ def init_telemetry(service_name: str) -> None:
         metrics.set_meter_provider(meter_provider)
         meter = metrics.get_meter(service_name)
 
-        # global 必须声明在赋值前，否则 Python 按局部变量解析报
-        # UnboundLocalError（brief 代码的 global 位置有误，此处修正）
-        global SEARCH_REQUESTS_TOTAL, SEARCH_QUOTA_REMAINING, SEARCH_QUOTA_RATIO
-        global SEARCH_KEY_POOL_SIZE, SEARCH_KEY_INVALID_TOTAL, SEARCH_REQUEST_DURATION
         SEARCH_REQUESTS_TOTAL = meter.create_counter(
             "search_requests_total", unit="1", description="Search requests by provider/engine/status")
         SEARCH_QUOTA_REMAINING = meter.create_up_down_counter(
@@ -83,6 +91,7 @@ def init_telemetry(service_name: str) -> None:
             explicit_bucket_boundaries_advisory=[0.1, 0.5, 1.0, 3.0, 5.0])
 
         _start_prometheus_server(service_name)
+        _initialized = True
     except Exception as e:
         logger.warning("telemetry_metrics_disabled", service=service_name, error=str(e))
 
