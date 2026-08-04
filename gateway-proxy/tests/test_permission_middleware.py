@@ -225,3 +225,140 @@ async def test_middleware_records_backend_failure(fake_redis, monkeypatch):
     _, fields = entries[0]
     assert fields["error_type"] == "upstream_timeout"
     assert fields["token_name"] == "readwrite"
+
+
+# ─── PermissionMiddleware.on_list_tools: permission filtering ─────
+
+
+class FakeTool:
+    """Simulates FastMCP Tool — on_list_tools only reads .name."""
+    def __init__(self, name):
+        self.name = name
+
+
+def _full_tool_list():
+    """The gateway's mounted tool list: zabbix read+write tools."""
+    return [
+        FakeTool("zabbix_list_active_problems"),   # read
+        FakeTool("zabbix_create_maintenance"),     # write
+    ]
+
+
+async def _seed_token(fake_redis, tok: str, permissions: dict):
+    import json
+    from auth import hash_token
+    await fake_redis.hset(
+        f"tokens:{hash_token(tok)}",
+        mapping={
+            "id": "tok_id",
+            "name": "test-token",
+            "permissions": json.dumps(permissions),
+        },
+    )
+
+
+async def test_list_tools_anonymous_returns_empty(fake_redis, monkeypatch):
+    """无 Authorization header → 空清单。"""
+    monkeypatch.setattr("permission_middleware.get_http_headers", lambda include=None: {})
+    mw = PermissionMiddleware()
+    result = await mw.on_list_tools(FakeContext("x"), lambda ctx: _full_tool_list())
+    assert result == []
+
+
+async def test_list_tools_invalid_token_returns_empty(fake_redis, monkeypatch):
+    """token 不在 Redis → 空清单。"""
+    monkeypatch.setattr(
+        "permission_middleware.get_http_headers",
+        lambda include=None: {"authorization": "Bearer tok_unknown"},
+    )
+    mw = PermissionMiddleware()
+    result = await mw.on_list_tools(FakeContext("x"), lambda ctx: _full_tool_list())
+    assert result == []
+
+
+async def test_list_tools_read_only_sees_only_read_tools(fake_redis, monkeypatch):
+    """zabbix 只 read → 只见读工具，写工具缺席。"""
+    await _seed_token(fake_redis, "tok_read", {"zabbix": {"read": True, "write": False}})
+    monkeypatch.setattr(
+        "permission_middleware.get_http_headers",
+        lambda include=None: {"authorization": "Bearer tok_read"},
+    )
+    mw = PermissionMiddleware()
+    result = await mw.on_list_tools(FakeContext("x"), lambda ctx: _full_tool_list())
+    names = [t.name for t in result]
+    assert "zabbix_list_active_problems" in names
+    assert "zabbix_create_maintenance" not in names
+
+
+async def test_list_tools_write_only_sees_only_write_tools(fake_redis, monkeypatch):
+    """zabbix 只 write → 只见写工具。"""
+    await _seed_token(fake_redis, "tok_write", {"zabbix": {"read": False, "write": True}})
+    monkeypatch.setattr(
+        "permission_middleware.get_http_headers",
+        lambda include=None: {"authorization": "Bearer tok_write"},
+    )
+    mw = PermissionMiddleware()
+    result = await mw.on_list_tools(FakeContext("x"), lambda ctx: _full_tool_list())
+    names = [t.name for t in result]
+    assert "zabbix_create_maintenance" in names
+    assert "zabbix_list_active_problems" not in names
+
+
+async def test_list_tools_read_write_sees_all(fake_redis, monkeypatch):
+    """read+write → 全见。"""
+    await _seed_token(fake_redis, "tok_rw", {"zabbix": {"read": True, "write": True}})
+    monkeypatch.setattr(
+        "permission_middleware.get_http_headers",
+        lambda include=None: {"authorization": "Bearer tok_rw"},
+    )
+    mw = PermissionMiddleware()
+    result = await mw.on_list_tools(FakeContext("x"), lambda ctx: _full_tool_list())
+    assert len(result) == 2
+
+
+async def test_list_tools_multi_server_mixed_permissions(fake_redis, monkeypatch):
+    """多 server 混合：各自按权限过滤后合并。"""
+    register_tools("tavily", [{"name": "tavily_search", "mode": "read"}])
+    try:
+        await _seed_token(fake_redis, "tok_mix", {
+            "zabbix": {"read": True, "write": False},
+            "tavily": {"read": True, "write": True},
+        })
+        monkeypatch.setattr(
+            "permission_middleware.get_http_headers",
+            lambda include=None: {"authorization": "Bearer tok_mix"},
+        )
+        tools = _full_tool_list() + [FakeTool("tavily_tavily_search")]
+        mw = PermissionMiddleware()
+        result = await mw.on_list_tools(FakeContext("x"), lambda ctx: tools)
+        names = {t.name for t in result}
+        assert names == {"zabbix_list_active_problems", "tavily_tavily_search"}
+    finally:
+        clear_tools("tavily")
+
+
+async def test_list_tools_unregistered_prefix_skipped(fake_redis, monkeypatch):
+    """未注册 server 前缀的工具 → 跳过不列出（全权限 token 也看不到）。"""
+    await _seed_token(fake_redis, "tok_all", {"zabbix": {"read": True, "write": True}})
+    monkeypatch.setattr(
+        "permission_middleware.get_http_headers",
+        lambda include=None: {"authorization": "Bearer tok_all"},
+    )
+    tools = _full_tool_list() + [FakeTool("ghost_some_tool")]
+    mw = PermissionMiddleware()
+    result = await mw.on_list_tools(FakeContext("x"), lambda ctx: tools)
+    names = {t.name for t in result}
+    assert "ghost_some_tool" not in names
+    assert len(result) == 2
+
+
+async def test_list_tools_empty_permissions_returns_empty(fake_redis, monkeypatch):
+    """token 无任何 server 权限 → 空清单。"""
+    await _seed_token(fake_redis, "tok_empty", {})
+    monkeypatch.setattr(
+        "permission_middleware.get_http_headers",
+        lambda include=None: {"authorization": "Bearer tok_empty"},
+    )
+    mw = PermissionMiddleware()
+    result = await mw.on_list_tools(FakeContext("x"), lambda ctx: _full_tool_list())
+    assert result == []

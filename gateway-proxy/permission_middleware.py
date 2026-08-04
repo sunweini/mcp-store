@@ -10,10 +10,12 @@ record_call_failure). It intercepts every tools/call request:
 4. If denied -> records an audit failure + increments metrics + raises ToolError.
 5. If allowed -> calls the backend; on exception classifies + records the failure.
 
-Non-tools/call requests (tools/list, ping, initialize) pass through untouched -
-the gateway returns an empty tool list for unauthenticated clients, which is
-by design: clients need to discover the gateway before they can call anything.
+tools/list is filtered by token permissions (on_list_tools): anonymous or
+invalid tokens get an empty list; valid tokens see only the tools their
+(server, mode) permissions grant. ping and initialize still pass through
+untouched so health checks work without auth.
 """
+import inspect
 import time
 import uuid
 
@@ -23,8 +25,9 @@ from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from opentelemetry import trace
 
-from auth import verify_token
+from auth import verify_token, check_permission
 from middleware import check_call_permission, classify_error, record_call_failure
+from routing import resolve_target, UnknownServerError
 # CRITICAL: import the module (not `from observability import ...`) so that
 # attribute access resolves at CALL TIME, picking up the post-init_telemetry()
 # values. A `from` import snapshots the names at import time (all None, because
@@ -64,8 +67,9 @@ def _current_trace_id() -> str:
 class PermissionMiddleware(Middleware):
     """Intercept tools/call: verify token, check permission, audit failures.
 
-    Only tools/call is intercepted - tools/list and other methods pass through
-    without auth so clients can discover the gateway before authenticating.
+    Intercepts tools/call (auth + permission + audit) and filters tools/list
+    by token permissions. ping/initialize pass through for unauthenticated
+    health checks.
     """
 
     async def on_call_tool(
@@ -152,3 +156,35 @@ class PermissionMiddleware(Middleware):
             observability.REQUEST_LATENCY.record(latency_ms / 1000.0)
 
         return result
+
+    async def on_list_tools(self, context: MiddlewareContext, call_next):
+        """Filter tools/list by token permissions (tool-level granularity).
+
+        Anonymous/invalid token -> empty list. Otherwise a tool is visible
+        iff the token grants its (server, mode). Mode comes from the same
+        TOOL_REGISTRY that tools/call checks, so list visibility and call
+        permission never diverge.
+        """
+        # call_next is async in production FastMCP but unit tests inject a
+        # sync lambda; normalize both so filtering logic stays identical.
+        tools = call_next(context)
+        if inspect.isawaitable(tools):
+            tools = await tools
+
+        token = _extract_token(get_http_headers())
+        token_info = await verify_token(token) if token else None
+        if token_info is None:
+            # 空清单而非报错：client 能连通但看不到工具，不泄露名称/描述，
+            # 也避免 list 报错引发 client 断连/重试风暴
+            return []
+
+        visible = []
+        for t in tools:
+            try:
+                server, _tool, mode = resolve_target(t.name)
+            except UnknownServerError:
+                # 未注册前缀：来源不确定，安全默认不列出
+                continue
+            if check_permission(token_info, server, mode):
+                visible.append(t)
+        return visible
