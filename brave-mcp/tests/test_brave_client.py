@@ -78,3 +78,35 @@ async def test_local_search_endpoint():
     assert result["local"]["results"][0]["title"] == "t"
     assert transport.last_request.url.path == "/res/v1/local/search"
     await client.close()
+
+
+async def test_proxy_passed_to_httpx_client(monkeypatch):
+    # 生产网络 brave 直连不通,必须走内网代理。MockTransport 注入模式下
+    # 代理不参与请求路径（httpx >= 0.27 允许 proxy 与 transport 共存），
+    # 断言点放在构造函数：proxy 关键字透传给 httpx.AsyncClient。
+    captured = {}
+    real_init = httpx.AsyncClient.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        captured["proxy"] = kwargs.get("proxy")
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", _patched_init)
+    client = BraveClient("BSA-test", proxy="http://10.16.12.12:7890")
+    assert captured["proxy"] == "http://10.16.12.12:7890"
+    await client.close()
+
+
+async def test_proxy_none_means_direct(monkeypatch):
+    # 未配置 SEARCH_PROXY 时传 None = 直连,httpx 不启用任何代理
+    captured = {}
+    real_init = httpx.AsyncClient.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        captured["proxy"] = kwargs.get("proxy")
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", _patched_init)
+    client = BraveClient("BSA-test", proxy=None)
+    assert captured["proxy"] is None
+    await client.close()

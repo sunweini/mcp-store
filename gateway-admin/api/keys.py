@@ -11,6 +11,7 @@ Never log key plaintext.
 """
 import calendar
 import json
+import os
 import time
 import uuid
 
@@ -228,7 +229,12 @@ async def _probe_key(provider: str, key: str, client: httpx.AsyncClient | None =
     client 参数仅供测试注入 MockTransport——生产调用方不传。
     """
     if client is None:
-        client = httpx.AsyncClient(timeout=5)
+        # 生产网络 api.search.brave.com 直连不通（IPv4 被墙/IPv6 不通），
+        # brave 探活必须与 brave-mcp 走同一内网代理（tavily/serpapi 直连
+        # 通，不受影响）；None/空串时 httpx 不启用代理。admin 容器部署时
+        # 也需配 SEARCH_PROXY。
+        proxy = os.environ.get("SEARCH_PROXY") or None
+        client = httpx.AsyncClient(timeout=5, proxy=proxy)
         owns_client = True
     else:
         owns_client = False

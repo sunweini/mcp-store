@@ -73,6 +73,20 @@ redis:6379 (内部,共享存储)
 「API Keys」页写入 Redis（`search:keys:<provider>`），MCP 启动时从 KeyPool 读取。
 搜索 MCP 需先在 UI 配好 key，工具调用才能成功。
 
+### brave 代理（SEARCH_PROXY）
+
+生产网络 api.search.brave.com 直连不通（IPv4 被墙、IPv6 不通），**仅
+brave 需要走内网代理**（tavily/serpapi 直连通）。`brave-mcp` 与
+`gateway-admin` 两个容器都从 compose 环境变量 `SEARCH_PROXY` 读取代理
+（admin 探活 brave key 时也要直连 brave API，所以两处都配）：
+
+```bash
+# 部署时传入（shell env 或 .env 文件均可）
+SEARCH_PROXY=http://10.16.12.12:7890 bash deploy/deploy.sh
+```
+
+未配置时两个容器保持直连（compose 默认 `${SEARCH_PROXY:-}` 空串）。
+
 ## Metrics scrape 配置
 
 | 目标 | 地址 | 指标 |

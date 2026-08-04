@@ -36,6 +36,7 @@ Brave Search MCP server：多 key 池（Redis 驱动）自动轮换与故障转�
 | `PROMETHEUS_PORT` | `9464` | Prometheus /metrics 端口（与 zabbix/tavily 同机部署会冲突，部署时需错开） |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | 无 | OTLP collector URL（未设则 console span） |
 | `OTEL_SERVICE_NAME` | `brave-mcp` | 服务名（trace/metrics label） |
+| `SEARCH_PROXY` | 空（直连） | HTTP 代理 URL（如 `http://10.16.12.12:7890`）。生产网络 api.search.brave.com 直连不通（IPv4 被墙/IPv6 不通），仅 brave 需要走代理；tavily/serpapi 直连通，不要配此变量 |
 
 ### 从源码运行
 

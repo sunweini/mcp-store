@@ -314,6 +314,61 @@ async def test_probe_brave_ok():
     assert res["ok"] is True
 
 
+async def test_probe_brave_uses_search_proxy_env(monkeypatch):
+    """client=None（生产路径）时 brave 探活必须走 SEARCH_PROXY 代理。
+
+    生产网络 api.search.brave.com 直连不通，仅 brave 需要代理（tavily/
+    serpapi 直连通）。断言 proxy 关键字从 env 传入 httpx.AsyncClient。
+
+    注意 httpx 0.28 的坑：proxy 与 transport 同时传时 proxy 覆盖
+    transport（真实连接优先），测试注入 MockTransport 时必须丢弃 proxy
+    ——这也是生产代码不同时传两者的原因。
+    """
+    import os
+    from api import keys as keys_module
+    from api.keys import _probe_key
+
+    monkeypatch.setenv("SEARCH_PROXY", "http://10.16.12.12:7890")
+    captured = {}
+    real_cls = httpx.AsyncClient
+
+    class _FakeClient(real_cls):
+        def __init__(self, *args, **kwargs):
+            captured["proxy"] = kwargs.get("proxy")
+            kwargs.pop("proxy", None)  # 见 docstring：proxy 会覆盖 transport
+            kwargs["transport"] = httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"web": {"results": []}}))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(keys_module.httpx, "AsyncClient", _FakeClient)
+    res = await _probe_key("brave", "bsa-x")
+    assert res["ok"] is True
+    assert captured["proxy"] == "http://10.16.12.12:7890"
+
+
+async def test_probe_brave_no_proxy_env_means_direct(monkeypatch):
+    """未配 SEARCH_PROXY 时 proxy=None（直连），且不影响 tavily 探活。"""
+    import os
+    from api import keys as keys_module
+    from api.keys import _probe_key
+
+    monkeypatch.delenv("SEARCH_PROXY", raising=False)
+    captured = {}
+    real_cls = httpx.AsyncClient
+
+    class _FakeClient(real_cls):
+        def __init__(self, *args, **kwargs):
+            captured["proxy"] = kwargs.get("proxy")
+            kwargs["transport"] = httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"answer": "ping"}))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(keys_module.httpx, "AsyncClient", _FakeClient)
+    res = await _probe_key("tavily", "tvly-x")
+    assert res["ok"] is True
+    assert captured["proxy"] is None
+
+
 async def test_probe_serpapi_ok():
     from api.keys import _probe_key
 

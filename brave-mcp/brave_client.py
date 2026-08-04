@@ -61,12 +61,18 @@ class BraveError(Exception):
 class BraveClient:
     """Thin async client. transport injectable for tests (httpx mock)."""
 
-    def __init__(self, key: str, timeout: float = TIMEOUT, transport=None):
+    def __init__(self, key: str, timeout: float = TIMEOUT, transport=None,
+                 proxy: str | None = None):
         self._key = key
         self._http = httpx.AsyncClient(
             timeout=timeout,
             headers={"X-Subscription-Token": key},
             transport=transport,
+            # 生产网络 api.search.brave.com 直连不通（IPv4 被墙/IPv6 不通），
+            # 必须经内网代理 http://10.16.12.12:7890；None 时 httpx 不启用
+            # 代理（httpx >= 0.27 支持 proxy 与 MockTransport 共存，测试
+            # 注入 transport 不受影响）
+            proxy=proxy,
         )
 
     async def web_search(self, params: dict) -> dict:

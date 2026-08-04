@@ -57,6 +57,9 @@ services:
       # 容器名互访: admin 通过 proxy 的 metrics 端口拉取 Prometheus 数据
       GATEWAY_PROXY_METRICS_URL: http://gateway-proxy:9465/metrics
       LOG_FILE: /app/logs/gateway-admin.log
+      # brave key 探活与 brave-mcp 走同一代理(admin 添加 key 时要直连
+      # brave API);空串 = 直连
+      SEARCH_PROXY: "${SEARCH_PROXY:-}"
     volumes:
       - ./logs/admin:/app/logs
     networks: [mcp-net]
@@ -119,6 +122,9 @@ services:
       LOG_FILE: /app/logs/brave-mcp.log
       BRAVE_QUOTA_DEFAULT: "2000"
       PROMETHEUS_PORT: "9464"
+      # 生产网络 api.search.brave.com 直连不通,必须走内网代理
+      # (tavily/serpapi 直连通,无需此变量);空串 = 直连
+      SEARCH_PROXY: "${SEARCH_PROXY:-}"
     volumes:
       - ./logs/brave-mcp:/app/logs
     networks: [mcp-net]

@@ -64,6 +64,9 @@ KeyPool (Redis search:keys:brave + pubsub 热更新) ←───────┘
   同机部署会冲突，Task 7 端口迁移时定） |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | 无 | OTLP collector URL（未设则 console span） |
 | `OTEL_SERVICE_NAME` | `brave-mcp` | 服务名（trace/metrics label） |
+| `SEARCH_PROXY` | 空（直连） | HTTP 代理 URL（如 `http://10.16.12.12:7890`）。
+  生产网络 api.search.brave.com 直连不通（IPv4 被墙/IPv6 不通），
+  仅 brave 需要走代理——tavily/serpapi 直连通，不要配此变量 |
 
 ## KeyPool 设计说明
 
