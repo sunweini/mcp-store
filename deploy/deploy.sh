@@ -20,9 +20,9 @@ echo "  docker: $(docker --version)"
 
 # config 含密钥不进镜像,首次运行从 .example 模板生成
 echo "[2/6] 检查 config..."
-mkdir -p "$CONFIG_DIR" "$DATA_DIR/redis" "$LOGS_DIR/proxy" "$LOGS_DIR/admin" "$LOGS_DIR/zabbix-mcp" \
-  "$LOGS_DIR/tavily-mcp" "$LOGS_DIR/brave-mcp" "$LOGS_DIR/serpapi-mcp"
-for f in proxy.env admin.env zabbix.env; do
+mkdir -p "$CONFIG_DIR" "$DATA_DIR/redis" "$DATA_DIR/mysql" "$LOGS_DIR/proxy" "$LOGS_DIR/admin" "$LOGS_DIR/zabbix-mcp" \
+  "$LOGS_DIR/tavily-mcp" "$LOGS_DIR/brave-mcp" "$LOGS_DIR/serpapi-mcp" "$LOGS_DIR/mysql"
+for f in proxy.env admin.env zabbix.env mysql.env; do
   if [ ! -f "$CONFIG_DIR/$f" ]; then
     cp "$CONFIG_DIR/$f.example" "$CONFIG_DIR/$f"
     echo "  已从模板生成 $f - 请编辑填入真实值"
@@ -34,10 +34,10 @@ if grep -q "CHANGE_ME_generate" "$CONFIG_DIR/admin.env" 2>/dev/null; then
   sed -i.bak "s|CHANGE_ME_generate_with_openssl_rand_base64_32|$SECRET|" "$CONFIG_DIR/admin.env" && rm -f "$CONFIG_DIR/admin.env.bak"
   echo "  已生成 JWT_SECRET"
 fi
-# 拒绝占位符配置进入运行时:用户未编辑 .env 会带默认占位值启动,导致鉴权失效或连不上 Zabbix
-grep -q 'CHANGE_ME_strong_password\|your-api-token\|your-zabbix' "$CONFIG_DIR/admin.env" "$CONFIG_DIR/zabbix.env" 2>/dev/null && {
+# 拒绝占位符配置进入运行时:用户未编辑 .env 会带默认占位值启动,导致鉴权失效或连不上 Zabbix/MySQL
+grep -q 'CHANGE_ME_strong_password\|your-api-token\|your-zabbix\|change_me_strong' "$CONFIG_DIR/admin.env" "$CONFIG_DIR/zabbix.env" "$CONFIG_DIR/mysql.env" 2>/dev/null && {
   echo "ERROR: config 仍含占位符,请先编辑 config/*.env 填入真实值" >&2; exit 1; }
-echo "  ⚠️  请确认 config/zabbix.env 的 ZABBIX_URL/ZABBIX_TOKEN 已填,admin.env 的 ADMIN_INIT_PASSWORD 已改"
+echo "  ⚠️  请确认 config/zabbix.env 的 ZABBIX_URL/ZABBIX_TOKEN 已填,admin.env 的 ADMIN_INIT_PASSWORD 已改,mysql.env 的 MYSQL_ROOT_PASSWORD/MYSQL_PASSWORD 已改"
 
 # 所有服务镜像 FROM mcp-base,需先构建
 echo "[3/6] build 基础镜像 mcp-base..."
@@ -65,8 +65,8 @@ echo "=== 部署完成 ==="
 echo "  Admin UI:  http://localhost:8081"
 echo "  Proxy:     http://localhost:8082/mcp"
 echo "  Metrics:   http://localhost:9465/metrics"
-echo "  日志:       $LOGS_DIR/{proxy,admin,zabbix-mcp,tavily-mcp,brave-mcp,serpapi-mcp}/"
-echo "  数据:       $DATA_DIR/redis/"
+echo "  日志:       $LOGS_DIR/{proxy,admin,zabbix-mcp,tavily-mcp,brave-mcp,serpapi-mcp,mysql}/"
+echo "  数据:       $DATA_DIR/{redis,mysql}/"
 echo ""
 echo "  管理命令:"
 echo "    docker compose -f $DEPLOY_DIR/docker-compose.yml logs -f"

@@ -25,6 +25,26 @@ services:
     networks: [mcp-net]
     restart: unless-stopped
 
+  # MySQL 审计库：tools/call 全量记录（calls 表），dashboard 聚合统计的数据源
+  # 容器内 3306 不映射宿主（与 redis 同模式，仅容器内网互访）
+  # init SQL 由镜像首启自动执行；数据持久化到 ./data/mysql/
+  mysql:
+    image: mysql:8.0
+    env_file:
+      - ./config/mysql.env
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+      - ./config/mysql-init:/docker-entrypoint-initdb.d:ro
+    networks: [mcp-net]
+    healthcheck:
+      # CMD-SHELL + $$ 让容器内 shell 从 env_file 注入的环境解析密码;
+      # compose 的 $VAR 插值不读 env_file,用 $$ 转义避免被 compose 清空
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -p$$MYSQL_ROOT_PASSWORD"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   gateway-proxy:
     build: ../gateway-proxy
     ports:
@@ -32,6 +52,9 @@ services:
       - "9465:9465"
     env_file:
       - ./config/proxy.env
+      # MYSQL_URL 在 mysql.env 里（直接写好完整连接串，避免 compose
+      # environment 不从 env_file 插值 $MYSQL_PASSWORD 的问题）
+      - ./config/mysql.env
     environment:
       # 容器名互访: redis 服务名即 DNS 名
       REDIS_URL: redis://redis:6379/0
@@ -56,6 +79,8 @@ services:
       # 时走同一代理。不写在 environment——compose 中 environment 优先级
       # 高于 env_file,${SEARCH_PROXY:-} 空串会覆盖 proxy.env 的真实值
       - ./config/proxy.env
+      # MYSQL_URL 在 mysql.env 里（同 gateway-proxy）
+      - ./config/mysql.env
     environment:
       REDIS_URL: redis://redis:6379/0
       # 容器名互访: admin 通过 proxy 的 metrics 端口拉取 Prometheus 数据
