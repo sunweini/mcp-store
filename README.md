@@ -5,18 +5,20 @@
 ## 架构
 
 ```
-MCP Client → gateway-proxy:8082 ──→ zabbix-mcp:9053 (告警巡检)
-      ↑              │        ├──→ tavily-mcp:9050  (搜索 5 tools)
-      │              │        ├──→ brave-mcp:9051   (搜索 2 tools)
-      │              │        └──→ serpapi-mcp:9052 (搜索 5 engines)
+MCP Client -> gateway-proxy:8082 ──-> zabbix-mcp:9053 (告警巡检)
+      ↑              │        ├──-> tavily-mcp:9050  (搜索 5 tools)
+      │              │        ├──-> brave-mcp:9051   (搜索 2 tools)
+      │              │        └──-> serpapi-mcp:9052 (搜索 5 engines)
       │              ↓
-gateway-admin:8081 (Server/Token/API Keys 管理 + 监控面板)
+gateway-admin:8081 (Server/Token/API Keys 管理 + 监控面板 + 请求日志)
       │
-   Redis (共享存储: server 注册 / token / key 池 / 审计)
+      ├── Redis (配置/状态: server 注册 / token / key 池 / 失败审计)
+      └── MySQL (调用审计: calls 表 / 聚合统计 / 请求明细，持久化重启不丢)
 ```
 
-- **gateway-proxy**：MCP 协议代理，Token 认证，读写权限控制，失败审计
-- **gateway-admin**：管理 API + Vue 3 前端（Server 管理、Token 管理、API Keys 管理、监控面板）
+- **gateway-proxy**：MCP 协议代理，Token 认证，读写权限控制，调用审计写 MySQL
+- **gateway-admin**：管理 API + Vue 3 前端（Server/Token/API Keys 管理、监控面板、请求日志）
+- **存储分工**：Redis 管配置/状态（热数据），MySQL 管调用审计（聚合+明细，重启不丢）
 - **搜索 MCP**：多 API key 池（Redis 驱动），轮换 + 欠费剔除 + 低配额告警（<10% 前台提示 / <5% 兜底切换）
 
 ## 组件
@@ -80,6 +82,7 @@ bash init.sh                            # 注册 server + 创建 token
 | `REDIS_URL` | Redis 连接（proxy/admin/MCP 共用） |
 | `JWT_SECRET` | admin 登录签名密钥 |
 | `SEARCH_PROXY` | brave 出网代理（生产网络直连不通时必配） |
+| `MYSQL_URL` | MySQL 连接（proxy/admin 共用，调用审计） |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTel trace 导出（可选） |
 
 ## 开发约定

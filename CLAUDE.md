@@ -29,16 +29,26 @@ mcpstore/
 ### MCP Gateway 架构
 
 ```
-MCP Client → gateway-proxy:8080 → [zabbix-mcp:9053, github-mcp:8001, ...]
+MCP Client -> gateway-proxy:8082 -> [zabbix-mcp:9053, tavily-mcp:9050, ...]
                   ↑
             gateway-admin:8081 (管理界面)
                   ↑
-               Redis (共享存储)
+        ┌─────────┴─────────┐
+        ↓                   ↓
+    Redis（配置/状态）    MySQL（调用审计）
+    - servers 注册        - calls 表（全量 tools/call）
+    - tokens              - 聚合统计源（重启不丢）
+    - key 池（search:keys）
+    - audit:failures（失败流）
 ```
 
 **两个核心服务：**
-- `gateway-proxy`：MCP 协议代理，Token 验证，读写权限控制
-- `gateway-admin`：管理 API + Vue 3 前端（Server 管理、Token 管理、监控面板）
+- `gateway-proxy`：MCP 协议代理，Token 验证，读写权限控制，调用审计写 MySQL
+- `gateway-admin`：管理 API + Vue 3 前端（Server/Token/API Keys 管理、监控面板、请求日志）
+
+**两个存储：**
+- `Redis`：配置与状态（server 注册、token、key 池、失败审计流）--热数据低延迟
+- `MySQL`：调用审计日志（calls 表，全量 tools/call）--聚合统计与明细，持久化重启不丢
 
 ### 接入 Gateway 流程
 
@@ -97,7 +107,7 @@ MCP Client → gateway-proxy:8080 → [zabbix-mcp:9053, github-mcp:8001, ...]
 
 ## 端口规范
 
-**MCP server 容器内端口统一分配 9050-9500**，新增 MCP 前先在此登记。
+**MCP server 容器内端口统一分配 9050-9500**，新增 MCP 前先在此登记。存储服务端口单独列。
 
 | 端口 | 服务 | 说明 |
 |---|---|---|
@@ -105,8 +115,10 @@ MCP Client → gateway-proxy:8080 → [zabbix-mcp:9053, github-mcp:8001, ...]
 | 9051 | brave-mcp | 搜索源（2 tools） |
 | 9052 | serpapi-mcp | 搜索源（5 engines） |
 | 9053 | zabbix-mcp | 告警巡检（8 tools） |
+| 6379 | redis | 配置/状态/失败审计（容器内，不映射宿主） |
+| 3306 | mysql | 调用审计 calls 表（容器内，不映射宿主） |
 
-- MCP server 容器内端口**不映射宿主端口**（与 gateway-proxy 8082 / gateway-admin 8081 分离，减少攻击面）
+- MCP server / redis / mysql 容器内端口**不映射宿主端口**（与 gateway-proxy 8082 / gateway-admin 8081 分离，减少攻击面）
 - 新增 MCP：从 9050-9500 取最小未用端口，登记本表 + 更新 compose
 - 本地非容器开发时按表使用对应本地端口
 
