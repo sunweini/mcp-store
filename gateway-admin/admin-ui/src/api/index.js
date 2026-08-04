@@ -36,3 +36,13 @@ export function addSearchKey(provider, data) { return apiFetch(`/api/search-keys
 export function updateSearchKey(provider, keyId, data) { return apiFetch(`/api/search-keys/${provider}/${keyId}`, { method:'PUT', body:JSON.stringify(data) }) }
 export function deleteSearchKey(provider, keyId) { return apiFetch(`/api/search-keys/${provider}/${keyId}`, { method:'DELETE' }) }
 export function getSearchKeyUsage(provider)  { return apiFetch(`/api/search-keys/${provider}/usage`) }
+
+// ── Call audit log (MySQL calls 表) ──────────────
+export function getCalls(params = {}) {
+  const p = new URLSearchParams()
+  if (params.server) p.set('server', params.server)
+  if (params.status) p.set('status', params.status)
+  if (params.limit) p.set('limit', params.limit)
+  if (params.offset) p.set('offset', params.offset)
+  return apiFetch(`/api/calls?${p}`)
+}
