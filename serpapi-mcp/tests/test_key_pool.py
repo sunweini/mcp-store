@@ -168,6 +168,34 @@ async def test_on_success_records_usage_and_resets(pool):
     assert pool_._records["k1"]["last_used_at"] is not None
 
 
+async def test_on_success_preserves_low_quota_warning(pool):
+    """成功不清低配额告警：ratio 8%（<10%）→ status 仍为 low_quota_warning。
+
+    bug 回归：原实现无条件置 active 并写回 Redis，前台 API Keys 页读
+    Redis status 展示告警时永远看不到低配额标红（spec「可用量 <10%
+    前台明显提示」失效）。"""
+    pool_, _ = pool
+    pool_._records["k1"]["monthly_quota"] = 1000
+    await pool_.on_success("k1", remaining=80)
+    assert pool_._records["k1"]["status"] == "low_quota_warning"
+
+
+async def test_on_success_preserves_low_quota(pool):
+    """成功不清低配额状态：ratio 3%（<5%）→ status 仍为 low_quota。"""
+    pool_, _ = pool
+    pool_._records["k1"]["monthly_quota"] = 1000
+    await pool_.on_success("k1", remaining=30)
+    assert pool_._records["k1"]["status"] == "low_quota"
+
+
+async def test_on_success_normal_quota_active(pool):
+    """配额充足时成功仍置 active（回归：正常路径不受影响）。"""
+    pool_, _ = pool
+    pool_._records["k1"]["monthly_quota"] = 1000
+    await pool_.on_success("k1", remaining=900)
+    assert pool_._records["k1"]["status"] == "active"
+
+
 async def test_reload_refreshes_records(pool):
     pool_, fake_redis = pool
     fake_redis._records["k3"] = _rec("k3", "SERP-c")

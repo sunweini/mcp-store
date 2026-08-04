@@ -174,12 +174,23 @@ class KeyPool:
         rec = self._records.get(key_id)
         if rec is None:
             return
-        rec["status"] = "active"
         rec["cooldown_until"] = None
         rec["last_used_at"] = _now_iso()
         rec["last_error"] = None
         if remaining is not None:
             rec["remaining"] = remaining
+        # 成功不清低配额状态：按最新 remaining 重算档位并持久化——前台
+        # API Keys 页读 Redis status 展示低配额告警，原实现无条件置
+        # active 会覆盖 next_key 算出的 low_quota 状态，告警永远看不到
+        ratio = self._ratio(rec)
+        if ratio is None:
+            rec["status"] = "active"
+        elif ratio < LOW_QUOTA_RATIO:
+            rec["status"] = "low_quota"
+        elif ratio < WARN_QUOTA_RATIO:
+            rec["status"] = "low_quota_warning"
+        else:
+            rec["status"] = "active"
         await self._write(key_id, rec)
         # 本地用量计数：ZSet member=now, score=now（按月窗口统计）
         now = time.time()
