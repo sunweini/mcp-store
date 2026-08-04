@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -73,7 +74,24 @@ app.include_router(tokens.router)
 app.include_router(dashboard.router)
 app.include_router(keys.router)
 
-# Serve Vue 3 SPA if dist exists (Plan C builds it)
+# Serve Vue 3 SPA if dist exists (Plan C builds it).
+# 不能用 StaticFiles 挂 "/"：它只对根路径返回 index.html，深层路由
+# （/api-keys、/tokens）刷新会 404。改用 catch-all：真实静态文件优先
+# 返回，否则回退 index.html 让前端路由接管（/api/* 已由上面 router 处理）。
 _dist = os.path.join(os.path.dirname(__file__), "admin-ui", "dist")
-if os.path.isdir(_dist):
-    app.mount("/", StaticFiles(directory=_dist, html=True), name="ui")
+_index_html = os.path.join(_dist, "index.html")
+
+
+@app.get("/{full_path:path}")
+async def spa_catch_all(full_path: str):
+    # /api/* 已被上面的 router 匹配；走到这里的 /api/* 是 404，不回退 SPA
+    if full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Not Found")
+    # 真实静态文件（/assets/index-xxx.js 等）直接返回
+    candidate = os.path.join(_dist, full_path)
+    if full_path and os.path.isfile(candidate):
+        return FileResponse(candidate)
+    # 其余路径（/、/api-keys、/servers 等前端路由）回退 index.html
+    if os.path.isfile(_index_html):
+        return FileResponse(_index_html)
+    raise HTTPException(status_code=404, detail="admin-ui not built")
