@@ -26,7 +26,7 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from opentelemetry import trace
 
 from auth import verify_token, check_permission
-from middleware import check_call_permission, classify_error, record_call_failure
+from middleware import check_call_permission, classify_error, record_call_failure, record_call_audit
 from routing import resolve_target, UnknownServerError
 # CRITICAL: import the module (not `from observability import ...`) so that
 # attribute access resolves at CALL TIME, picking up the post-init_telemetry()
@@ -118,6 +118,8 @@ class PermissionMiddleware(Middleware):
                 trace_id=trace_id,
                 fail_stage="auth" if error_type == "invalid_token" else "route",
             )
+            # 双写：Redis failures 流 + MySQL calls 表（失败条目两处都记）
+            await record_call_audit(token_info, tool_name, latency_ms, trace_id, "fail", error_type)
             # Metrics: count the auth failure + record latency.
             if observability.AUTH_FAILURES:
                 observability.AUTH_FAILURES.add(1, {"error_type": error_type})
@@ -143,6 +145,8 @@ class PermissionMiddleware(Middleware):
                 trace_id=trace_id,
                 fail_stage=tool_name.split("_", 1)[0] if "_" in tool_name else "backend",
             )
+            # 双写：Redis failures 流 + MySQL calls 表
+            await record_call_audit(token_info, tool_name, latency_ms, trace_id, "fail", err_type)
             if observability.REQUESTS_TOTAL:
                 observability.REQUESTS_TOTAL.add(1, {"status": "error"})
             if observability.REQUEST_LATENCY:
@@ -154,6 +158,9 @@ class PermissionMiddleware(Middleware):
             observability.REQUESTS_TOTAL.add(1, {"status": "ok"})
         if observability.REQUEST_LATENCY:
             observability.REQUEST_LATENCY.record(latency_ms / 1000.0)
+
+        # 成功也写 calls 表：请求日志页需要全量调用明细（不止失败）
+        await record_call_audit(token_info, tool_name, latency_ms, trace_id, "ok")
 
         return result
 

@@ -444,3 +444,66 @@ async def test_list_tools_no_underscore_tool_skipped(fake_redis, monkeypatch):
     result = await mw.on_list_tools(FakeContext("x"), lambda ctx: tools)
     names = {t.name for t in result}
     assert names == {"zabbix_list_active_problems", "zabbix_create_maintenance"}
+
+
+# ─── on_call_tool 写 MySQL calls ─────────────────────────────────
+
+async def test_call_success_writes_calls(fake_redis, monkeypatch):
+    """成功调用 -> record_call 被调一次 status=ok。"""
+    from auth import hash_token
+    await fake_redis.hset(
+        f"tokens:{hash_token('tok_ok')}",
+        mapping={"id": "t1", "name": "caller",
+                 "permissions": '{"zabbix": {"read": true, "write": false}}'},
+    )
+    monkeypatch.setattr("permission_middleware.get_http_headers",
+                        lambda include=None: {"authorization": "Bearer tok_ok"})
+    calls = []
+    async def fake_record_call(meta, status, error_type=None):
+        calls.append((meta, status, error_type))
+    monkeypatch.setattr("middleware.record_call", fake_record_call)
+
+    async def call_next(ctx): return "result"
+    await PermissionMiddleware().on_call_tool(FakeContext("zabbix_list_active_problems"), call_next)
+
+    assert len(calls) == 1
+    meta, status, _ = calls[0]
+    assert status == "ok"
+    assert meta["server"] == "zabbix"
+    assert meta["tool"] == "list_active_problems"
+    assert meta["token_name"] == "caller"
+
+
+async def test_call_denied_writes_calls_fail(fake_redis, monkeypatch):
+    """权限拒绝 -> record_call status=fail + error_type，且 record_failure 仍调（Redis）。"""
+    monkeypatch.setattr("permission_middleware.get_http_headers",
+                        lambda include=None: {})  # 无 token
+    calls = []
+    async def fake_record_call(meta, status, error_type=None):
+        calls.append((status, error_type))
+    monkeypatch.setattr("middleware.record_call", fake_record_call)
+
+    from fastmcp.exceptions import ToolError
+    with pytest.raises(ToolError):
+        await PermissionMiddleware().on_call_tool(
+            FakeContext("zabbix_list_active_problems"), lambda ctx: "x")
+    assert calls == [("fail", "invalid_token")]
+
+
+async def test_call_exception_writes_calls_fail(fake_redis, monkeypatch):
+    """后端异常 -> record_call status=fail + upstream_error。"""
+    from auth import hash_token
+    await fake_redis.hset(f"tokens:{hash_token('tok_rw')}",
+        mapping={"id": "t2", "name": "c2", "permissions": '{"zabbix": {"read": true, "write": true}}'})
+    monkeypatch.setattr("permission_middleware.get_http_headers",
+                        lambda include=None: {"authorization": "Bearer tok_rw"})
+    calls = []
+    async def fake_record_call(meta, status, error_type=None):
+        calls.append((status, error_type))
+    monkeypatch.setattr("middleware.record_call", fake_record_call)
+
+    async def call_next(ctx): raise RuntimeError("backend down")
+    with pytest.raises(RuntimeError):
+        await PermissionMiddleware().on_call_tool(
+            FakeContext("zabbix_create_maintenance"), call_next)
+    assert calls == [("fail", "upstream_error")]

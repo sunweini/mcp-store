@@ -13,7 +13,7 @@ import httpx
 
 from auth import check_permission
 from routing import resolve_target, UnknownServerError
-from audit import record_failure
+from audit import record_failure, record_call
 
 
 def check_call_permission(token_info: dict | None, mcp_name: str) -> tuple[bool, str | None]:
@@ -91,4 +91,38 @@ async def record_call_failure(
             "token_name": token_name,
             "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         },
+    )
+
+
+async def record_call_audit(
+    token_info: dict | None,
+    mcp_name: str,
+    latency_ms: int,
+    trace_id: str,
+    status: str,
+    error_type: str | None = None,
+) -> None:
+    """写全量调用明细到 MySQL calls 表（成功+失败均写）。
+
+    与 record_call_failure 互补：failures 流（Redis）供失败面板，
+    calls 表（MySQL）供请求日志页 + 聚合统计。失败条目双写。
+    """
+    server, tool, op = "", "", "read"
+    try:
+        server, tool, op = resolve_target(mcp_name)
+    except (ValueError, UnknownServerError):
+        pass
+    token_name = token_info.get("name", "(anonymous)") if token_info else "(anonymous)"
+    await record_call(
+        meta={
+            "trace_id": trace_id,
+            "server": server,
+            "tool": tool,
+            "op": op,
+            "token_name": token_name,
+            "latency_ms": latency_ms,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S.000", time.gmtime()),
+        },
+        status=status,
+        error_type=error_type,
     )
