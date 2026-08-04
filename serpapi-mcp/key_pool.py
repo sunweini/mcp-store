@@ -98,11 +98,40 @@ class KeyPool:
                     await self.reload()
             except Exception:
                 # Redis 短暂故障不致命 — 保留现有池，等待下次通知；
-                # 有日志便于排障（热更新静默失效是最难查的问题之一）
+                # 有日志便于排障（热更新静默失效是最难查的问题之一）。
+                # 注意：redis-py 的 pubsub 在连接断开后不会自动重连，
+                # get_message 会永远抛错——只 sleep 重试是无效的（正式
+                # 环境踩到：Redis 重启后热更新永久失效，只能重启容器），
+                # 必须重建订阅才能自愈
                 logger.warning("key_pool_listen_retry",
                                service="serpapi-mcp",
                                provider=self.provider, error="pubsub_error")
+                await self._resubscribe()
                 await asyncio.sleep(5)
+
+    async def _resubscribe(self) -> None:
+        """pubsub 连接断开后重建订阅（redis-py 不会自动重连 pubsub）。
+
+        正式环境踩到：Redis 重启后 get_message 永远抛错，热更新永久
+        失效，只能重启 MCP。这里重建 pubsub 对象 + 重新订阅频道——
+        redis client 是连接池，pubsub() 每次返回新 pubsub 对象（自动
+        用新连接），Redis 恢复后重建自然成功，实现自愈。
+        本方法不向外抛异常：subscribe 失败（Redis 仍不可用）也吞掉，
+        留给外层 except 的 sleep(5) 重试循环——循环必须永远存活。
+        """
+        try:
+            # 旧 pubsub 底层连接已死，close 防连接泄漏
+            await self._pubsub.aclose()
+        except Exception:
+            pass
+        try:
+            self._pubsub = self._redis.pubsub()
+            await self._pubsub.subscribe("search:keys:channel")
+        except Exception:
+            # Redis 未恢复时 pubsub()/subscribe 同样抛错——吞掉让外层
+            # 自然重试；此处若抛出会杀死 _listen 任务，回到只能重启
+            # 容器的老问题
+            pass
 
     async def reload(self) -> None:
         raw = await self._redis.hgetall(self._pool_key)

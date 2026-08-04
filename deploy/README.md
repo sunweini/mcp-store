@@ -36,7 +36,7 @@ bash deploy/init.sh
 |---|---|---|
 | `zabbix.env` | `ZABBIX_URL`, `ZABBIX_TOKEN` | Zabbix API 连接(必填) |
 | `admin.env` | `JWT_SECRET`, `ADMIN_INIT_PASSWORD` | admin 密码与 JWT 签名 |
-| `proxy.env` | `OTEL_EXPORTER_OTLP_ENDPOINT` | 可选,OTel 收集器 |
+| `proxy.env` | `OTEL_EXPORTER_OTLP_ENDPOINT`, `SEARCH_PROXY` | 可选;OTel 收集器;brave 出网代理(见下) |
 
 ## 持久化目录
 
@@ -77,15 +77,20 @@ redis:6379 (内部,共享存储)
 
 生产网络 api.search.brave.com 直连不通（IPv4 被墙、IPv6 不通），**仅
 brave 需要走内网代理**（tavily/serpapi 直连通）。`brave-mcp` 与
-`gateway-admin` 两个容器都从 compose 环境变量 `SEARCH_PROXY` 读取代理
-（admin 探活 brave key 时也要直连 brave API，所以两处都配）：
+`gateway-admin` 两个容器都从 `config/proxy.env` 的 `SEARCH_PROXY` 读取
+代理（admin 探活 brave key 时也要直连 brave API，所以两处都配）：
 
 ```bash
-# 部署时传入（shell env 或 .env 文件均可）
-SEARCH_PROXY=http://10.16.12.12:7890 bash deploy/deploy.sh
+# 1. 在 proxy.env 填入代理（注意:该文件也是 gateway-proxy 的共享配置，
+#    均为通用变量,三个服务共读无副作用）
+vim deploy/config/proxy.env
+#   SEARCH_PROXY=http://10.16.12.12:7890
+
+# 2. 正常部署即可——代理随 config 持久化,rebuild/重部署不丢
+bash deploy/deploy.sh
 ```
 
-未配置时两个容器保持直连（compose 默认 `${SEARCH_PROXY:-}` 空串）。
+未配置（proxy.env 中 `SEARCH_PROXY=` 留空）时两个容器保持直连。
 
 ## Metrics scrape 配置
 

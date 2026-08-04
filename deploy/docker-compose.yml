@@ -52,14 +52,15 @@ services:
       - "8081:8081"
     env_file:
       - ./config/admin.env
+      # SEARCH_PROXY 在此定义(见 proxy.env.example):admin 探活 brave key
+      # 时走同一代理。不写在 environment——compose 中 environment 优先级
+      # 高于 env_file,${SEARCH_PROXY:-} 空串会覆盖 proxy.env 的真实值
+      - ./config/proxy.env
     environment:
       REDIS_URL: redis://redis:6379/0
       # 容器名互访: admin 通过 proxy 的 metrics 端口拉取 Prometheus 数据
       GATEWAY_PROXY_METRICS_URL: http://gateway-proxy:9465/metrics
       LOG_FILE: /app/logs/gateway-admin.log
-      # brave key 探活与 brave-mcp 走同一代理(admin 添加 key 时要直连
-      # brave API);空串 = 直连
-      SEARCH_PROXY: "${SEARCH_PROXY:-}"
     volumes:
       - ./logs/admin:/app/logs
     networks: [mcp-net]
@@ -91,7 +92,8 @@ services:
   # 三个搜索 MCP:容器内端口 9050/9051/9052,不映射宿主 MCP 端口
   # (仅容器内网互访);metrics 端口各自映射到宿主 9466/9467/9468
   # (容器内统一 9464,宿主端避开 gateway-proxy 的 9465)
-  # 无 env_file / 无 key env——API key 由 gateway-admin 写入 Redis(keys.py),MCP 启动时从 KeyPool 读取
+  # 无 key env——API key 由 gateway-admin 写入 Redis(keys.py),MCP 启动时从 KeyPool 读取;
+  # 仅 brave-mcp 用 env_file 注入 SEARCH_PROXY(出网代理,见下)
   tavily-mcp:
     build: ../tavily-mcp
     ports:
@@ -114,6 +116,12 @@ services:
     build: ../brave-mcp
     ports:
       - "9467:9464"
+    # SEARCH_PROXY 在此定义(见 proxy.env.example)——生产网络
+    # api.search.brave.com 直连不通,必须走内网代理(tavily/serpapi 直连
+    # 通,无需此变量)。不写在 environment——compose 中 environment 优先级
+    # 高于 env_file,${SEARCH_PROXY:-} 空串会覆盖 proxy.env 的真实值
+    env_file:
+      - ./config/proxy.env
     environment:
       REDIS_URL: redis://redis:6379/0
       MCP_HOST: "0.0.0.0"
@@ -122,9 +130,6 @@ services:
       LOG_FILE: /app/logs/brave-mcp.log
       BRAVE_QUOTA_DEFAULT: "2000"
       PROMETHEUS_PORT: "9464"
-      # 生产网络 api.search.brave.com 直连不通,必须走内网代理
-      # (tavily/serpapi 直连通,无需此变量);空串 = 直连
-      SEARCH_PROXY: "${SEARCH_PROXY:-}"
     volumes:
       - ./logs/brave-mcp:/app/logs
     networks: [mcp-net]

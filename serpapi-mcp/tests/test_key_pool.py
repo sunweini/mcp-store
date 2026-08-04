@@ -256,6 +256,72 @@ async def test_listen_survives_pubsub_error(pool):
         await pool_._listen_task
 
 
+async def test_listen_resubscribes_after_pubsub_error(pool, monkeypatch):
+    """pubsub 断线自愈（正式环境回归）：get_message 抛 ConnectionError
+    后必须重建订阅——原实现只 sleep 重试，redis-py 的 pubsub 连接死后
+    get_message 永远抛错（不会自动重连），热更新永久失效只能重启容器。
+    断言重建（redis.pubsub() 工厂 + 新对象 subscribe 被调）与重建后
+    消息触发 reload（新 key 可见）。"""
+    import asyncio
+
+    pool_, fake_redis = pool
+    fake_redis._records["k3"] = _rec("k3", "SERP-c")
+
+    # 加速重试循环：把 _listen 的 5s sleep 压成一次调度让出，避免测试
+    # 等真实 5 秒。保留原 sleep 引用供自身让出控制权——打补丁后不能再
+    # 调 asyncio.sleep（会无限递归）
+    orig_sleep = asyncio.sleep
+
+    async def fast_sleep(_):
+        await orig_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+    raised_once = {"done": False}
+
+    class ReconnectingPubSub:
+        """首次 get_message 抛 ConnectionError（连接已死），此后返回
+        消息——模拟 Redis 重启后恢复。subscribe 记录频道供断言。"""
+
+        def __init__(self):
+            self.calls = 0
+            self.subscribed_channels = None
+
+        async def subscribe(self, *channels, **kwargs):
+            self.subscribed_channels = channels
+
+        async def get_message(self, ignore_subscribe_messages=False, timeout=30):
+            await orig_sleep(0)
+            self.calls += 1
+            if not raised_once["done"]:
+                raised_once["done"] = True
+                raise ConnectionError("redis down")
+            return {"type": "message", "channel": b"search:keys:channel",
+                    "data": b"reload"}
+
+    pubsub_factory_calls = {"n": 0}
+
+    def make_pubsub():
+        # 重建必须走 redis client 工厂（连接池每次给新 pubsub 对象）
+        pubsub_factory_calls["n"] += 1
+        return ReconnectingPubSub()
+
+    pool_._pubsub = ReconnectingPubSub()  # 初始 pubsub：首次调用即抛错
+    fake_redis.pubsub = make_pubsub       # 连接死后从工厂拿新对象
+    await pool_.start()
+    for _ in range(20):
+        await orig_sleep(0)  # 多次让出，让监听循环走完 重建→重试 全过程
+    # 断线后必须重建订阅：redis.pubsub() 工厂与新对象 subscribe 都被调用
+    assert pubsub_factory_calls["n"] == 1
+    assert pool_._pubsub.subscribed_channels == ("search:keys:channel",)
+    # 重建后的订阅能收到消息 → reload 生效，新 key 可见（原 bug 下只有
+    # key_pool_listen_retry 循环，新 key 永远不可见）
+    assert "k3" in pool_._records
+    assert not pool_._listen_task.done()
+    pool_._listen_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pool_._listen_task
+
+
 async def test_listen_ignores_subscribe_confirm_and_reloads_on_message(pool):
     """热更新消息接收回归：subscribe 确认消息必须被滤掉、message 触发
     reload（redis-py 6+ 参数改名踩坑点，见 brave-mcp 注释）。"""
