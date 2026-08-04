@@ -171,8 +171,27 @@ class PermissionMiddleware(Middleware):
         if inspect.isawaitable(tools):
             tools = await tools
 
-        token = _extract_token(get_http_headers())
-        token_info = await verify_token(token) if token else None
+        # NOTE: get_http_headers() excludes 'authorization' by default.
+        # Must pass include={"authorization"} to get the Bearer token
+        # (same pitfall as on_call_tool above).
+        token = _extract_token(get_http_headers(include={"authorization"}))
+
+        # Same guard as on_call_tool: malformed Redis data (corrupted hash,
+        # truncated JSON) must not crash tools/list; treat any exception as
+        # invalid token -> empty list below.
+        token_info = None
+        if token:
+            try:
+                token_info = await verify_token(token)
+            except Exception as exc:
+                logger.warning(
+                    "verify_token_exception",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                    service="gateway-proxy",
+                )
+                token_info = None
+
         if token_info is None:
             # 空清单而非报错：client 能连通但看不到工具，不泄露名称/描述，
             # 也避免 list 报错引发 client 断连/重试风暴
@@ -182,8 +201,10 @@ class PermissionMiddleware(Middleware):
         for t in tools:
             try:
                 server, _tool, mode = resolve_target(t.name)
-            except UnknownServerError:
-                # 未注册前缀：来源不确定，安全默认不列出
+            except (ValueError, UnknownServerError):
+                # ValueError = 无下划线前缀，UnknownServerError = 未注册前缀。
+                # 来源无法确定时安全默认不列出（与 check_call_permission 的
+                # 捕获语义对齐，避免 tools/list 因畸形工具名 500）
                 continue
             if check_permission(token_info, server, mode):
                 visible.append(t)

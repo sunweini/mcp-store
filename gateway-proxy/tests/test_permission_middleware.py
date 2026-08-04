@@ -362,3 +362,85 @@ async def test_list_tools_empty_permissions_returns_empty(fake_redis, monkeypatc
     mw = PermissionMiddleware()
     result = await mw.on_list_tools(FakeContext("x"), lambda ctx: _full_tool_list())
     assert result == []
+
+
+# ─── on_list_tools: review fixes (C1 header / I1 guard / I2 ValueError / M1 async) ───
+
+
+def _make_http_request(headers: dict[str, str]):
+    """Minimal starlette Request carrying only the given headers."""
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/mcp",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+    }
+    return Request(scope)
+
+
+async def test_list_tools_real_http_context_authorization_passes(fake_redis):
+    """不 monkeypatch get_http_headers：真实 fastmcp 函数 + 真实 HTTP 上下文。
+
+    fastmcp 的 get_http_headers 默认排除 authorization——on_list_tools 必须传
+    include={"authorization"} 才能取到 token。若有人删掉 include 参数，
+    有效 token 会退化为空清单，本测试失败（C1 回归防线）。
+    """
+    from fastmcp.server.http import _current_http_request
+
+    await _seed_token(fake_redis, "tok_real", {"zabbix": {"read": True, "write": True}})
+    cv_token = _current_http_request.set(
+        _make_http_request({"authorization": "Bearer tok_real"})
+    )
+    try:
+        mw = PermissionMiddleware()
+        result = await mw.on_list_tools(FakeContext("x"), lambda ctx: _full_tool_list())
+        assert len(result) == 2
+    finally:
+        _current_http_request.reset(cv_token)
+
+
+async def test_list_tools_async_call_next(fake_redis, monkeypatch):
+    """生产 FastMCP 的 call_next 是 async——覆盖 inspect.isawaitable 的 await 分支。"""
+    await _seed_token(fake_redis, "tok_async", {"zabbix": {"read": True, "write": True}})
+    monkeypatch.setattr(
+        "permission_middleware.get_http_headers",
+        lambda include=None: {"authorization": "Bearer tok_async"},
+    )
+
+    async def call_next(ctx):
+        return _full_tool_list()
+
+    mw = PermissionMiddleware()
+    result = await mw.on_list_tools(FakeContext("x"), call_next)
+    assert len(result) == 2
+
+
+async def test_list_tools_verify_token_exception_returns_empty(fake_redis, monkeypatch):
+    """verify_token 抛异常（Redis 脏数据）→ 空清单而非异常，对齐 on_call_tool 防护。"""
+    async def boom_verify(token):
+        raise KeyError("corrupted")
+
+    monkeypatch.setattr("permission_middleware.verify_token", boom_verify)
+    monkeypatch.setattr(
+        "permission_middleware.get_http_headers",
+        lambda include=None: {"authorization": "Bearer any_token"},
+    )
+    mw = PermissionMiddleware()
+    result = await mw.on_list_tools(FakeContext("x"), lambda ctx: _full_tool_list())
+    assert result == []
+
+
+async def test_list_tools_no_underscore_tool_skipped(fake_redis, monkeypatch):
+    """无下划线前缀的工具名 → split_prefix 抛 ValueError → 跳过，不能 500。"""
+    await _seed_token(fake_redis, "tok_noprefix", {"zabbix": {"read": True, "write": True}})
+    monkeypatch.setattr(
+        "permission_middleware.get_http_headers",
+        lambda include=None: {"authorization": "Bearer tok_noprefix"},
+    )
+    tools = _full_tool_list() + [FakeTool("rootlevel")]
+    mw = PermissionMiddleware()
+    result = await mw.on_list_tools(FakeContext("x"), lambda ctx: tools)
+    names = {t.name for t in result}
+    assert names == {"zabbix_list_active_problems", "zabbix_create_maintenance"}
