@@ -7,6 +7,7 @@ this stream to populate the dashboard failure feed + trace view.
 import json
 import structlog
 from redis_client import get_redis
+from db import get_pool
 
 logger = structlog.get_logger()
 
@@ -56,3 +57,21 @@ async def record_failure(
     except Exception as e:
         # NOTE: audit must never break the request path; log and continue.
         logger.error("audit_write_failed", error=str(e), service="gateway-proxy")
+
+
+async def record_call(meta: dict, status: str, error_type: str | None = None) -> None:
+    """INSERT 调用记录到 MySQL calls 表。旁路：失败仅记日志不阻断。"""
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO calls (time, server, tool, op, token_name, "
+                    "latency_ms, status, error_type, trace) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (meta["time"], meta["server"], meta["tool"], meta["op"],
+                     meta["token_name"], meta["latency_ms"], status,
+                     error_type or "", meta["trace_id"]),
+                )
+    except Exception as e:
+        logger.error("audit_call_write_failed", error=str(e), service="gateway-proxy")
