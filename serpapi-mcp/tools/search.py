@@ -23,7 +23,10 @@ from serpapi_client import SerpapiClient, classify_error
 
 logger = structlog.get_logger()
 
-DEFAULT_TIMEOUT = 5.0
+# 10s 而非 tavily/brave 的 5s：serpapi 聚合多引擎（google 聚合搜索
+# 等），实测直连 2.2s、MCP 路径更慢——5s 太紧,正常请求易触发
+# ReadTimeout,而超时属瞬时问题不写 key 状态,结果只是白等一轮
+DEFAULT_TIMEOUT = 10.0
 
 # 单一来源：工具名 → engine 参数（即 SerpAPI 的 engine 值）。5 引擎全是
 # 幂等 GET，统一 retryable=True。SerpapiClient.search(engine, params) 的
@@ -102,7 +105,11 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
         await pool.on_success(key_rec["key_id"])
         return {"status": "ok", "data": resp}
     kind = _classify(exc)
-    await pool.on_error(key_rec["key_id"], kind or ErrorKind.EXHAUSTED)
+    # 仅可归类错误才写 key 状态（实测超时/连接错误 classify_error 返回
+    # None——瞬时问题,key 本身有效,写 EXHAUSTED 会把好 key 永久剔除,
+    # 曾致一次 ReadTimeout 杀掉全部 key）
+    if kind:
+        await pool.on_error(key_rec["key_id"], kind)
     if retryable:
         # 换下一 key 重试一次（幂等操作才允许）；next_key 已排除刚标记
         # 失败的 key，None 或同 key 均表示无可换 key
@@ -113,7 +120,8 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
                 await pool.on_success(key_rec2["key_id"])
                 return {"status": "ok", "data": resp2}
             kind2 = _classify(exc2)
-            await pool.on_error(key_rec2["key_id"], kind2 or ErrorKind.EXHAUSTED)
+            if kind2:
+                await pool.on_error(key_rec2["key_id"], kind2)
     # 最终失败消息只含 status + 截断 body（SerpapiError.detail 是
     # resp.text 截断，安全）——不落 str(exc)：网络异常（httpx.HTTPError）
     # 的 repr 带完整请求 URL，serpapi 的 api_key 在 query 里，str(exc)

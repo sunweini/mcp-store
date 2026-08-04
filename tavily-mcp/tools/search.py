@@ -16,7 +16,6 @@ from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 import structlog
 
-from key_pool import ErrorKind
 from tavily_client import TavilyClient, classify_error
 
 logger = structlog.get_logger()
@@ -127,7 +126,11 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
         await _report_success(key_rec, remaining)
         return {"status": "ok", "data": resp}
     kind = classify_error(exc, getattr(exc, "status_code", None))
-    await pool.on_error(key_rec["key_id"], kind or ErrorKind.EXHAUSTED)
+    # 仅可归类错误才写 key 状态（实测超时/连接错误 classify_error 返回
+    # None——瞬时问题,key 本身有效,写 EXHAUSTED 会把好 key 永久剔除,
+    # 曾致 serpapi 一次 ReadTimeout 杀掉全部 key）
+    if kind:
+        await pool.on_error(key_rec["key_id"], kind)
     if retryable:
         # 换下一 key 重试一次（幂等操作才允许）；next_key 已排除刚标记
         # 失败的 key，None 或同 key 均表示无可换 key
@@ -138,7 +141,8 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
                 await _report_success(key_rec2, remaining2)
                 return {"status": "ok", "data": resp2}
             kind2 = classify_error(exc2, getattr(exc2, "status_code", None))
-            await pool.on_error(key_rec2["key_id"], kind2 or ErrorKind.EXHAUSTED)
+            if kind2:
+                await pool.on_error(key_rec2["key_id"], kind2)
     return {"status": "error", "message": str(exc)}
 
 

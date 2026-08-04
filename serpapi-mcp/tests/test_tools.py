@@ -72,16 +72,19 @@ class FakePool:
             self._records[key_id]["status"] = kind.value
 
 
-def _client_factory(made, fail=None, fail_status=401, fail_body="", fail_once=False):
+def _client_factory(made, fail=None, fail_status=401, fail_body="", fail_once=False,
+                    fail_exc=None):
     """Build a client_factory; every created FakeClient appended to `made`.
 
     fail: engine 名（该 engine 所有调用失败）。fail_once: 仅第一个
     client 失败（failover 成功场景）；需与 fail 联用。
+    fail_exc: 透传给 FakeClient（模拟 httpx 超时/网络异常用）。
     """
     def _make(key, timeout):
         client = FakeClient(key, timeout=timeout,
                             fail=(fail if not fail_once or not made else None),
-                            fail_status=fail_status, fail_body=fail_body)
+                            fail_status=fail_status, fail_body=fail_body,
+                            fail_exc=fail_exc)
         made.append(client)
         return client
     return _make
@@ -107,7 +110,7 @@ async def test_google_passes_params():
     engine, params = made[0].calls[0]
     assert engine == "google"
     assert params == {"q": "hello world", "gl": "us", "hl": "en", "num": 5, "start": 10}
-    assert made[0].timeout == 5.0
+    assert made[0].timeout == 10.0  # serpapi 聚合多引擎,超时放宽至 10s
     assert pool.successes == ["k1"]
     assert made[0].closed == 1  # 每个 client 用完即关（close 非 aclose）
 
@@ -252,6 +255,71 @@ async def test_rate_limit_does_not_retry_same_key():
     assert result["status"] == "error"
     assert pool.errors == [("k1", ErrorKind.RATE_LIMIT)]
     assert len(made) == 1
+
+
+# ── 超时/网络错误不写 key 状态（实测 bug 回归）─────────────────────────────────
+
+
+class _FakeTimeout(Exception):
+    """模拟 httpx.ReadTimeout：无 status_code,classify_error 返回 None。
+
+    实测事故：一次 ReadTimeout 经 kind or ErrorKind.EXHAUSTED 兜底把
+    全部 key 永久剔除。超时/连接错误是瞬时问题,key 本身有效——不写
+    key 状态,失败后 key 保持 active,下次请求仍可用。
+    """
+
+
+async def test_timeout_does_not_mark_key_error():
+    """单 key 超时 → status:error，key 状态不变（on_error 未被调用）。"""
+    pool = FakePool(records={"k1": _rec("k1", "SERP-k1")})
+    made = []
+    result = await serpapi_google(
+        "q", pool=pool,
+        client_factory=_client_factory(made, fail_exc=_FakeTimeout()))
+    assert result["status"] == "error"
+    # 关键断言：on_error 一次都没被调用——超时不会剔除/冷却任何 key
+    assert pool.errors == []
+    assert pool._records["k1"]["status"] == "active"  # 下次请求仍可用
+    assert len(made) == 1  # next_key 返回同一 key,守卫挡住不重试
+
+
+async def test_timeout_second_key_failure_keeps_both_keys():
+    """重试分支同样不写 key 状态：两 key 都超时 → error，但都保持 active。"""
+    pool = FakePool(records={
+        "k1": _rec("k1", "SERP-k1"),
+        "k2": _rec("k2", "SERP-k2"),
+    })
+    made = []
+    result = await serpapi_google(
+        "q", pool=pool,
+        client_factory=_client_factory(made, fail_exc=_FakeTimeout()))
+    assert result["status"] == "error"
+    assert pool.errors == []
+    assert pool._records["k1"]["status"] == "active"
+    assert pool._records["k2"]["status"] == "active"
+
+
+async def test_retry_failover_timeout_on_second_key_keeps_second_key():
+    """k1 401（可归类→标记 INVALID）→ 换 k2 重试,k2 超时（不可归类）→
+    k2 不写状态。回归点：重试分支若仍兜底 EXHAUSTED,k2 会被永久剔除。"""
+    pool = FakePool(records={
+        "k1": _rec("k1", "SERP-k1"),
+        "k2": _rec("k2", "SERP-k2"),
+    })
+    made = []
+
+    def _make(key, timeout):
+        client = FakeClient(key, timeout=timeout,
+                            fail="google" if not made else None,
+                            fail_exc=None if not made else _FakeTimeout())
+        made.append(client)
+        return client
+
+    result = await serpapi_google("q", pool=pool, client_factory=_make)
+    assert result["status"] == "error"
+    assert [c.key for c in made] == ["SERP-k1", "SERP-k2"]
+    assert pool.errors == [("k1", ErrorKind.INVALID)]  # 只标记了 k1
+    assert pool._records["k2"]["status"] == "active"  # k2 超时未被剔除
 
 
 async def test_quota_exhausted_marks_key_exhausted():

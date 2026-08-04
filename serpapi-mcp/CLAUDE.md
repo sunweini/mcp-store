@@ -30,11 +30,11 @@ KeyPool (Redis search:keys:serpapi + pubsub 热更新) ←──────┘
 
 | Tool | 引擎 | 重试策略 | 超时 | 说明 |
 |---|---|---|---|---|
-| `serpapi_google` | google | 换 key 重试 1 次 | 5s | Google Web 搜索（gl/hl/num/start） |
-| `serpapi_bing` | bing | 换 key 重试 1 次 | 5s | Bing 搜索（gl/hl/cc/count） |
-| `serpapi_baidu` | baidu | 换 key 重试 1 次 | 5s | 百度搜索（cti/page_num） |
-| `serpapi_duckduckgo` | duckduckgo | 换 key 重试 1 次 | 5s | DuckDuckGo（kl） |
-| `serpapi_ebay` | ebay | 换 key 重试 1 次 | 5s | eBay 商品搜索（_nkw/ebay_domain） |
+| `serpapi_google` | google | 换 key 重试 1 次 | 10s | Google Web 搜索（gl/hl/num/start） |
+| `serpapi_bing` | bing | 换 key 重试 1 次 | 10s | Bing 搜索（gl/hl/cc/count） |
+| `serpapi_baidu` | baidu | 换 key 重试 1 次 | 10s | 百度搜索（cti/page_num） |
+| `serpapi_duckduckgo` | duckduckgo | 换 key 重试 1 次 | 10s | DuckDuckGo（kl） |
+| `serpapi_ebay` | ebay | 换 key 重试 1 次 | 10s | eBay 商品搜索（_nkw/ebay_domain） |
 
 5 引擎全是幂等 GET 查询，失败后换下一 key 重试一次（serpapi 无长任务）。
 
@@ -46,7 +46,7 @@ KeyPool (Redis search:keys:serpapi + pubsub 热更新) ←──────┘
 | 429 | RATE_LIMIT | 冷却 30s（Retry-After 头未解析，恒用默认——设计选择：避免外部控制 cooldown 过长） |
 | 200 + body 含 quota 关键词 | EXHAUSTED | 永久剔除（欠费） |
 | 其余 4xx/5xx | EXHAUSTED | 标记不可用 |
-| 网络/超时 | EXHAUSTED | 同上 |
+| 网络/超时 | 不记账 | 瞬时问题，key 本身有效，不写任何状态（classify_error 返回 None 时不调 on_error） |
 
 > **EXHAUSTED 判据**（serpapi 特有）：欠费返回 **200** + error body 而非
 > 4xx（实测 body：`"Account has exceeded quota, for more info visit

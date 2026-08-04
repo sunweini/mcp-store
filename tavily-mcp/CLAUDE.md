@@ -42,7 +42,7 @@ KeyPool (Redis search:keys:tavily + pubsub 热更新) ←──────┘
 | 401/403 | INVALID | 永久剔除 |
 | 429 | RATE_LIMIT | 冷却 30s（Retry-After 头未解析，恒用默认——设计选择：避免外部控制 cooldown 过长） |
 | 其余 4xx/5xx | EXHAUSTED | 标记不可用 |
-| 网络/超时 | EXHAUSTED | 同上 |
+| 网络/超时 | 不记账 | 瞬时问题，key 本身有效，不写任何状态（classify_error 返回 None 时不调 on_error） |
 
 幂等轻查询（search/extract/map）失败后换下一 key 重试一次；长任务
 （crawl/research）失败直接返回 error，不重试（重跑成本高）。

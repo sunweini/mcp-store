@@ -43,7 +43,7 @@ KeyPool (Redis search:keys:brave + pubsub 热更新) ←───────┘
 | 429 | RATE_LIMIT | 冷却 30s（Retry-After 头未解析，恒用默认——设计选择：避免外部控制 cooldown 过长） |
 | 422 + body 含 "subscription token is invalid" | INVALID | 永久剔除（见下） |
 | 其余 4xx/5xx | EXHAUSTED | 标记不可用（Brave 无欠费 body 语义，全部归此） |
-| 网络/超时 | EXHAUSTED | 同上 |
+| 网络/超时 | 不记账 | 瞬时问题，key 本身有效，不写任何状态（classify_error 返回 None 时不调 on_error） |
 
 > **实测注意**：Brave 对无效 subscription token 返回 **422** 而非 401
 > （错误 body `detail: "The provided subscription token is invalid."`，

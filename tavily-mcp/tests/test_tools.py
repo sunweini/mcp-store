@@ -18,12 +18,13 @@ class FakeClient:
     """
 
     def __init__(self, key, timeout=5.0, fail=None, fail_status=401,
-                 remaining_field=None):
+                 remaining_field=None, fail_exc=None):
         self.key = key
         self.timeout = timeout
         self.fail = fail
         self.fail_status = fail_status
         self.remaining_field = remaining_field
+        self.fail_exc = fail_exc  # 注入任意异常（模拟 httpx 超时/网络异常）
         self.calls = []
         self.closed = 0
         self.usage_calls = 0
@@ -58,6 +59,8 @@ class FakeClient:
 
     async def _hit(self, endpoint, params, ok_payload):
         self.calls.append((endpoint, dict(params)))
+        if self.fail_exc is not None:
+            raise self.fail_exc
         if self.fail == endpoint:
             raise TavilyError(self.fail_status, "scripted failure")
         return ok_payload
@@ -100,18 +103,20 @@ class FakePool:
 
 
 def _client_factory(made, fail=None, fail_status=401, fail_once=False,
-                    remaining_field=None):
+                    remaining_field=None, fail_exc=None):
     """Build a client_factory; every created FakeClient appended to `made`.
 
     fail: endpoint 名（该 endpoint 所有调用失败）。fail_once: 仅第一个
     client 失败（failover 成功场景）；需与 fail 联用。
     remaining_field: 透传给 FakeClient（search 响应带 remaining 用）。
+    fail_exc: 透传给 FakeClient（模拟 httpx 超时/网络异常用）。
     """
     def _make(key, timeout):
         client = FakeClient(key, timeout=timeout,
                             fail=(fail if not fail_once or not made else None),
                             fail_status=fail_status,
-                            remaining_field=remaining_field)
+                            remaining_field=remaining_field,
+                            fail_exc=fail_exc)
         made.append(client)
         return client
     return _make
@@ -308,6 +313,69 @@ async def test_rate_limit_does_not_retry_same_key():
     assert result["status"] == "error"
     assert pool.errors == [("k1", ErrorKind.RATE_LIMIT)]
     assert len(made) == 1
+
+
+# ── 超时/网络错误不写 key 状态（实测 bug 回归）─────────────────────────────────
+
+
+class _FakeTimeout(Exception):
+    """模拟 httpx.ReadTimeout：无 status_code,classify_error 返回 None。
+
+    真实场景：httpx.ReadTimeout/ConnectError 是瞬时问题,key 本身有效。
+    曾因 kind or ErrorKind.EXHAUSTED 兜底把好 key 永久剔除（实测 serpapi
+    一次 ReadTimeout 杀掉全部 key）——本组测试锁定「不写 key 状态」。
+    """
+
+
+async def test_timeout_does_not_mark_key_error():
+    """单 key 超时 → status:error，key 状态不变（on_error 未被调用）。"""
+    pool = FakePool(records={"k1": _rec("k1", "tvly-k1")})
+    made = []
+    result = await tavily_search("q", pool=pool,
+                                 client_factory=_client_factory(made, fail_exc=_FakeTimeout()))
+    assert result["status"] == "error"
+    # 关键断言：on_error 一次都没被调用——超时不会剔除/冷却任何 key
+    assert pool.errors == []
+    assert pool._records["k1"]["status"] == "active"  # 下次请求仍可用
+    assert len(made) == 1  # next_key 返回同一 key,守卫挡住不重试
+
+
+async def test_timeout_second_key_failure_keeps_both_keys():
+    """重试分支同样不写 key 状态：两 key 都超时 → error，但都保持 active。"""
+    pool = FakePool(records={
+        "k1": _rec("k1", "tvly-k1"),
+        "k2": _rec("k2", "tvly-k2"),
+    })
+    made = []
+    result = await tavily_search("q", pool=pool,
+                                 client_factory=_client_factory(made, fail_exc=_FakeTimeout()))
+    assert result["status"] == "error"
+    assert pool.errors == []
+    assert pool._records["k1"]["status"] == "active"
+    assert pool._records["k2"]["status"] == "active"
+
+
+async def test_retry_failover_timeout_on_second_key_keeps_second_key():
+    """k1 401（可归类→标记 INVALID）→ 换 k2 重试,k2 超时（不可归类）→
+    k2 不写状态。回归点：重试分支若仍兜底 EXHAUSTED,k2 会被永久剔除。"""
+    pool = FakePool(records={
+        "k1": _rec("k1", "tvly-k1"),
+        "k2": _rec("k2", "tvly-k2"),
+    })
+    made = []
+
+    def _make(key, timeout):
+        client = FakeClient(key, timeout=timeout,
+                            fail="search" if not made else None,
+                            fail_exc=None if not made else _FakeTimeout())
+        made.append(client)
+        return client
+
+    result = await tavily_search("q", pool=pool, client_factory=_make)
+    assert result["status"] == "error"
+    assert [c.key for c in made] == ["tvly-k1", "tvly-k2"]
+    assert pool.errors == [("k1", ErrorKind.INVALID)]  # 只标记了 k1
+    assert pool._records["k2"]["status"] == "active"  # k2 超时未被剔除
 
 
 async def test_clients_closed_on_success_fail_and_failover():
