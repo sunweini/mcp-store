@@ -26,6 +26,7 @@ export function deleteServer(name)          { return apiFetch(`/api/servers/${na
 export function updateServer(name, data)    { return apiFetch(`/api/servers/${name}`, { method:'PUT', body:JSON.stringify(data) }) }
 export function pingServer(name)            { return apiFetch(`/api/servers/${name}/status`) }
 export function refreshTools(name)          { return apiFetch(`/api/servers/${name}/refresh-tools`, { method:'POST' }) }
+export function lifecycleServer(name, action) { return apiFetch(`/api/servers/${name}/lifecycle`, { method: 'POST', body: JSON.stringify({ action }) }) }
 export function getTokens()                 { return apiFetch('/api/tokens') }
 export function createToken(data)           { return apiFetch('/api/tokens', { method:'POST', body:JSON.stringify(data) }) }
 export function deleteToken(id)             { return apiFetch(`/api/tokens/${id}`, { method:'DELETE' }) }

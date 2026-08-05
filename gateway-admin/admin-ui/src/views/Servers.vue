@@ -34,6 +34,7 @@
               <span class="led" :class="s.health && s.health.up ? 'ok pulse' : 'err'"></span>
               {{ s.health && s.health.up ? '健康' : '不可达' }}
             </span>
+            <span class="status-chip" :class="lcClass(s.status)">{{ lcLabel(s.status) }}</span>
             <span class="mono" style="font-size:10px;color:var(--faint)">{{ healthLatency(s) }}</span>
           </div>
           <div class="srv-meta">
@@ -73,6 +74,9 @@
             <button class="mini-btn" @click="doPing(s)">立即探活</button>
             <button class="mini-btn" @click="doRefreshTools(s)">刷新 Tools</button>
             <button class="mini-btn" @click="openEditModal(s)">编辑</button>
+            <button v-if="s.status === 'active'" class="mini-btn" @click="doLifecycle(s, 'disable')">禁用</button>
+            <button v-if="s.status === 'active'" class="mini-btn" @click="doLifecycle(s, 'stop')">停用</button>
+            <button v-else class="mini-btn" @click="doLifecycle(s, 'enable')">启用</button>
             <button class="mini-btn danger" @click="doDelete(s)">删除</button>
           </div>
         </div>
@@ -99,7 +103,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { getServers, createServer, deleteServer, updateServer, pingServer, refreshTools } from '../api/index.js'
+import { getServers, createServer, deleteServer, updateServer, pingServer, refreshTools, lifecycleServer } from '../api/index.js'
 import Modal from '../components/Modal.vue'
 
 /* ── state ── */
@@ -133,6 +137,11 @@ function healthLatency(s) {
   if (!h.up) return '超时'
   return '—'
 }
+
+/* ── lifecycle 徽标（active 运行/绿、disabled 禁用/黄、stopped 停用/灰） ── */
+const LC = { active: ['运行', 'ok'], disabled: ['禁用', 'warn'], stopped: ['停用', 'dim'] }
+function lcLabel(st) { return (LC[st] || LC.active)[0] }
+function lcClass(st) { return (LC[st] || LC.active)[1] }
 
 /* ── actions ── */
 async function load() {
@@ -210,6 +219,17 @@ async function doRefreshTools(s) {
     }
   } catch (e) {
     error.value = '刷新 Tools 失败: ' + e.message
+  }
+}
+
+async function doLifecycle(s, action) {
+  // stop 会移除 gateway 挂载且容器需人工停，加 confirm 防误操作；disable/enable 幂等可逆，不加
+  if (action === 'stop' && !confirm(`停用 ${s.name}：gateway 将移除该服务，容器需手动停止。继续？`)) return
+  try {
+    await lifecycleServer(s.name, action)
+    await load()
+  } catch (e) {
+    error.value = '生命周期操作失败: ' + e.message
   }
 }
 

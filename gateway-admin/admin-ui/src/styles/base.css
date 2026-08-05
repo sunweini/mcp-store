@@ -136,6 +136,7 @@ input, select { font-family: inherit; }
 .status-chip.ok { color: var(--ok); background: var(--ok-dim); }
 .status-chip.warn { color: var(--warn); background: var(--warn-dim); }
 .status-chip.err { color: var(--err); background: var(--err-dim); }
+.status-chip.dim { color: var(--muted); background: var(--panel-2); border-color: var(--border); }
 
 /* ───────────────────────── Inline chips (permissions, etc) ───────────────────────── */
 .perm-chips { display: flex; gap: 6px; flex-wrap: wrap; }
