@@ -1,8 +1,10 @@
-"""Failure audit logging to a Redis Stream.
+"""Failure audit: double-write Redis Stream + MySQL.
 
-The proxy writes one entry per failed request, including the full request
-journey (which stage failed + per-stage timing). The admin service reads
-this stream to populate the dashboard failure feed + trace view.
+The proxy writes one entry per failed request to the audit:failures Redis
+Stream (kept as a double-write/rollback fallback) AND a status=fail row to the
+MySQL calls table (with message + journey). The admin service now reads the
+failure feed, trace view, aggregates and detail from MySQL calls -- the Redis
+stream is retained only for compatibility/rollback, not as the primary source.
 """
 import json
 import structlog
@@ -30,6 +32,9 @@ async def record_failure(
     meta: dict,
 ) -> None:
     """Append a failure record to the audit:failures Redis Stream.
+
+    Redis 流现为双写/回滚兜底——admin 失败面板/聚合/明细均改读 MySQL calls 表
+    （status=fail 行，含 message+journey）。保留此写仅为兼容与回滚。
 
     journey: [{stage, state, ms}, ...] - state is ok|fail|skip
     error_type: one of ERROR_TYPES

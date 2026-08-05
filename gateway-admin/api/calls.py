@@ -1,6 +1,7 @@
 """请求明细 API：读 MySQL calls 表（全量 tools/call，成功+失败）。
 
-与 /api/failures（Redis 失败流）互补：calls 含全部，failures 只含失败。
+与 /api/failures 同源（均读 MySQL calls 表）：calls 含全部，failures 只含
+status=fail 的行。两面板计数严格一致。
 """
 from fastapi import APIRouter, Depends, Query
 

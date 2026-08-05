@@ -8,7 +8,7 @@ MCP 网关代理。聚合后端 MCP server，token 认证，读写权限控制�
 - 自定义 TokenVerifier：SHA-256 比对 Redis
 - PermissionMiddleware：解析 {server}_{tool} 前缀，查 read/write 权限
 - Registry：Redis Pub/Sub 热加载 server
-- Audit：失败写 Redis Stream（audit:failures）；全量调用写 MySQL（calls 表，聚合+明细）
+- Audit：全量调用（成功+失败）写 MySQL calls 表（聚合+明细+失败轨迹）；失败同时双写 Redis Stream（audit:failures，仅作回滚兜底，admin 已改读 MySQL）
 
 ## 本地开发
 ```bash

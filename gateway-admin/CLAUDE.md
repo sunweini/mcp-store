@@ -7,7 +7,7 @@ MCP 网关管理面。FastAPI 管理 API（server/token/dashboard/calls）+ Vue 
 - FastAPI + APIRouter（servers/tokens/dashboard）
 - JWT 管理员认证（bcrypt + PyJWT）
 - 写 Redis（server/token/admin），proxy 通过 Pub/Sub 热加载
-- 读 MySQL（calls 表聚合统计 + 请求明细）+ Redis Stream（audit:failures，失败面板）
+- 读 MySQL（calls 表：聚合统计 + 请求明细 + 失败面板/轨迹）；Redis 仅 servers/tokens/失败双写兜底
 
 ## 本地开发
 ```bash
@@ -27,4 +27,4 @@ uv run pytest tests/ -v
 | GATEWAY_PROXY_METRICS_URL | http://localhost:9464/metrics | Prometheus |
 
 ## 共享 Redis schema
-见根 CLAUDE.md + gateway-proxy。admin 写 servers/tokens/admin，读 audit:failures。
+见根 CLAUDE.md + gateway-proxy。admin 写 servers/tokens/admin，读 MySQL calls 表（聚合/明细/失败面板）。
