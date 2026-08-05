@@ -11,8 +11,10 @@ from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 # ── Configuration ────────────────────────────────────────────────
-HOST = os.environ.get("MCP_HOST", "127.0.0.1")
-PORT = int(os.environ.get("MCP_PORT", "8000"))
+# NOTE: MCP_PORT 必须用根 CLAUDE.md 端口表登记的最小未用端口（9050-9500），
+# 不要默认 8000——容器内端口规范统一，登记后再开发。
+HOST = os.environ.get("MCP_HOST", "0.0.0.0")
+PORT = int(os.environ.get("MCP_PORT", "905x"))  # TODO: 登记端口后改实际值
 
 logger = structlog.get_logger()
 

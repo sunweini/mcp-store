@@ -24,7 +24,7 @@
 {
   "mcpServers": {
     "{{mcp-name}}": {
-      "url": "http://localhost:8000/mcp"
+      "url": "http://localhost:<登记端口>/mcp"
     }
   }
 }

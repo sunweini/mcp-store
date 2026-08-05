@@ -86,7 +86,7 @@ MCP Client -> gateway-proxy:8082 -> [zabbix-mcp:9053, tavily-mcp:9050, ...]
    {
      "mcpServers": {
        "gateway": {
-         "url": "http://localhost:8080/mcp",
+         "url": "http://localhost:8082/mcp",
          "headers": {
            "Authorization": "Bearer <token>"
          }
@@ -223,7 +223,7 @@ uv run python client.py   # 验证
 
 ## MCP 开发规范（Gateway-ready 强制项）
 
-每个 MCP 必须满足以下规范才能接入 Gateway。详细写法见 `templates/mcp-template/CLAUDE.md`。
+> **⚠️ 每次 MCP 开发必须以 `templates/mcp-template/CLAUDE.md` 为开发指南**——新建 MCP 时复制 `templates/mcp-template/` 整个目录，按其全部章节开发（含端口登记、uv.lock 阿里云镜像、FastMCP v4 注册模式、可观测性、Redis 坑）。以下是速查表，详细写法见模板。
 
 | 规范 | 要求 | 说明 |
 |---|---|---|
@@ -233,6 +233,10 @@ uv run python client.py   # 验证
 | **读写分离** | 全部 tool 标 annotations | `destructiveHint=True` → write，否则 read |
 | **写操作标记** | docstring 含 `⚠️ 写操作` | AI 读到此标记走用户确认流程 |
 | **健康探活** | 支持 MCP `ping` | FastMCP 原生支持，无需额外开发 |
+| **端口登记** | 容器内端口 9050-9500 取最小未用 | 先登记根 CLAUDE.md 端口表再开发；不映射宿主 |
+| **uv.lock 阿里云** | lock 必须指向阿里云镜像 | 生产构建前提；`UV_INDEX_URL=... uv lock` 重建 |
+| **工具组织** | 模块级函数 + 显式具名 register 包装 | FastMCP v4 拒绝 `*args/**kwargs` 包装（实测） |
+| **key 安全** | 明文 key 禁入日志/metric label | URL query key（如 serpapi）防 httpx 日志泄漏 |
 | **可观测性** | structlog + OTel | 遵循 `~/.claude/docs/observability-coding-standards.md` |
 | **代码注释** | 写"为什么"不写"做了什么" | OBS-CORE-005 |
 
