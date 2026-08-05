@@ -1,7 +1,8 @@
-"""Dashboard API: metrics from MySQL + failures from Redis Stream.
+"""Dashboard API: metrics + failures 均读 MySQL calls 表。
 
-Metrics aggregate from MySQL calls table (survives restart). Failures come from
-the audit:failures Redis Stream written by gateway-proxy's audit module.
+Metrics aggregate from MySQL calls table (survives restart). Failures 面板
+也改读 calls 表（status='fail'），与总请求数同源一致；Redis audit:failures
+流仍由 proxy 双写，仅作回滚兜底，admin 不再读。
 """
 import json
 from datetime import datetime, timedelta
@@ -9,7 +10,6 @@ from fastapi import APIRouter, Depends, Query
 
 from auth import require_admin
 from db import get_pool
-from redis_client import get_redis
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
@@ -141,24 +141,48 @@ async def list_failures(
     offset: int = Query(0, ge=0),
     _: str = Depends(require_admin),
 ):
-    """Read failed requests from the audit:failures Redis Stream (newest first)."""
-    r = get_redis()
-    # XREVRANGE returns newest first; +offset for pagination
-    entries = await r.xrevrange("audit:failures", count=limit + offset)
-    entries = entries[offset:]  # skip offset
+    """Failed requests from MySQL calls table (status='fail'), newest first.
+
+    为什么改读 MySQL：失败面板与总请求/错误数统计（同表聚合）同源，
+    口径必然一致；Redis 流有 MAXLEN 截断且重启丢数据，仅作回滚兜底。
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            where = "WHERE status = %s"
+            args: list = ["fail"]
+            if server:
+                where += " AND server = %s"
+                args.append(server)
+            # ORDER BY id DESC：自增 id 与写入顺序一致，比 time 排序更便宜
+            # （time 无索引覆盖排序，id 是主键倒序扫描）
+            await cur.execute(
+                f"SELECT trace, server, tool, op, error_type, message, "
+                f"latency_ms, time, journey FROM calls {where} "
+                f"ORDER BY id DESC LIMIT %s OFFSET %s",
+                args + [limit, offset],
+            )
+            rows = await cur.fetchall()
+
     out = []
-    for _id, fields in entries:
-        rec = {
-            "trace": fields.get("trace", ""),
-            "server": fields.get("server", ""),
-            "tool": fields.get("tool", ""),
-            "op": fields.get("op", ""),
-            "error_type": fields.get("error_type", ""),
-            "message": fields.get("message", ""),
-            "latency_ms": int(fields["latency_ms"]) if fields.get("latency_ms", "").isdigit() else 0,
-            "time": fields.get("time", ""),
-            "journey": json.loads(fields.get("journey", "[]")),
-        }
-        if server is None or rec["server"] == server:
-            out.append(rec)
+    for trace, srv, tool, op, error_type, message, latency_ms, t, journey in rows:
+        try:
+            parsed_journey = json.loads(journey) if journey else []
+        except (TypeError, ValueError):
+            # 脏数据防御：历史行/手工改坏的 journey 不能让面板 500
+            parsed_journey = []
+        out.append({
+            "trace": trace or "",
+            "server": srv or "",
+            "tool": tool or "",
+            "op": op or "",
+            "error_type": error_type or "",
+            "message": message or "",
+            "latency_ms": int(latency_ms or 0),
+            # calls 表 time 是 UTC 墙钟（proxy 用 gmtime 写入）；格式化成
+            # Redis 时代的 ISO+Z 字符串，前端 ago() 的 new Date() 按 UTC 解析
+            # 才不失真（缺 Z 会按浏览器本地时区偏移）
+            "time": t.strftime("%Y-%m-%dT%H:%M:%SZ") if t else "",
+            "journey": parsed_journey,
+        })
     return out

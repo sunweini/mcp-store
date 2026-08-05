@@ -10,6 +10,10 @@ CREATE TABLE IF NOT EXISTS calls (
   status VARCHAR(8) NOT NULL,
   error_type VARCHAR(32) NOT NULL DEFAULT '',
   trace VARCHAR(64) NOT NULL DEFAULT '',
+  -- 失败面板数据源统一到此表：message 存错误信息，journey 存请求轨迹 JSON
+  -- NOTE: MySQL 8 的 TEXT 列不支持字面量默认值（error 1101），必须用表达式默认值 DEFAULT ('...')
+  message TEXT NOT NULL DEFAULT (''),
+  journey TEXT NOT NULL DEFAULT ('[]'),
   INDEX idx_time (time),
   INDEX idx_server (server),
   INDEX idx_status (status)

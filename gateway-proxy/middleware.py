@@ -41,6 +41,28 @@ def classify_error(exc: Exception) -> str:
     return "upstream_error"
 
 
+def build_journey(fail_stage: str, server: str, latency_ms: int) -> list[dict]:
+    """Build the request journey: stages before fail_stage are ok, the fail
+    stage carries the total latency, and stages after it were never reached
+    (skip).
+
+    NOTE: 独立成函数是因为失败面板数据源统一到 MySQL calls 表后，
+    on_call_tool 需自行构建 journey 写入 calls 行，与 record_call_failure
+    写 Redis 流的轨迹共用同一套 stage 推演逻辑，保证两处一致。
+    """
+    stages = ["client", "gateway", "auth", "route", server or "backend"]
+    journey = []
+    for i, st in enumerate(stages):
+        if st == fail_stage:
+            journey.append({"stage": st, "state": "fail", "ms": latency_ms})
+            # subsequent stages were not reached
+            for after in stages[i + 1:]:
+                journey.append({"stage": after, "state": "skip", "ms": 0})
+            break
+        journey.append({"stage": st, "state": "ok", "ms": 0})
+    return journey
+
+
 async def record_call_failure(
     token_info: dict | None,
     mcp_name: str,
@@ -62,16 +84,7 @@ async def record_call_failure(
     except (ValueError, UnknownServerError):
         pass
 
-    stages = ["client", "gateway", "auth", "route", server or "backend"]
-    journey = []
-    for i, st in enumerate(stages):
-        if st == fail_stage:
-            journey.append({"stage": st, "state": "fail", "ms": latency_ms})
-            # subsequent stages were not reached
-            for after in stages[i + 1:]:
-                journey.append({"stage": after, "state": "skip", "ms": 0})
-            break
-        journey.append({"stage": st, "state": "ok", "ms": 0})
+    journey = build_journey(fail_stage, server, latency_ms)
 
     # Include the token name in the audit meta so the admin UI can show
     # which credential was used (or "(anonymous)" for missing tokens).
@@ -101,11 +114,14 @@ async def record_call_audit(
     trace_id: str,
     status: str,
     error_type: str | None = None,
+    message: str | None = None,
+    journey: list | None = None,
 ) -> None:
     """写全量调用明细到 MySQL calls 表（成功+失败均写）。
 
-    与 record_call_failure 互补：failures 流（Redis）供失败面板，
-    calls 表（MySQL）供请求日志页 + 聚合统计。失败条目双写。
+    与 record_call_failure 互补：failures 流（Redis）保留双写供回滚，
+    calls 表（MySQL）是请求日志页 + 聚合统计 + 失败面板的统一数据源。
+    message/journey 由 on_call_tool 失败路径传入，成功行留空。
     """
     server, tool, op = "", "", "read"
     try:
@@ -125,4 +141,6 @@ async def record_call_audit(
         },
         status=status,
         error_type=error_type,
+        message=message,
+        journey=journey,
     )

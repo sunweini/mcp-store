@@ -203,18 +203,76 @@ def test_metrics_timeseries_server_filter(client, auth_headers, monkeypatch):
     assert args == ["zabbix"]
 
 
-# ── /api/failures (Redis Stream, 保留不动) ──
+# ── /api/failures (MySQL calls 表) ──
+# 失败面板数据源统一到 MySQL：与总请求/错误数同源。Redis 流仍由 proxy 双写，
+# admin 不再读（旧 Stream 测试随之移除）
 
-async def test_failures_from_stream(client, fake_redis, auth_headers):
-    # seed a failure in the audit stream
-    await fake_redis.xadd("audit:failures", {
-        "trace": "abc", "server": "zabbix", "tool": "list", "op": "read",
-        "error_type": "upstream_timeout", "message": "timeout", "latency_ms": "30",
-        "time": "2026-07-30T12:00:00Z", "journey": "[]", "token_name": "ro",
-    })
+def _fail_row(trace="abc", server="zabbix", tool="list", op="read",
+              error_type="upstream_timeout", message="timeout",
+              latency_ms=30, when=None, journey='[{"stage": "auth", "state": "fail", "ms": 30}]'):
+    """构造 calls 表 SELECT 顺序的行元组（time 是 DATETIME -> datetime 对象）。"""
+    from datetime import datetime
+    return (trace, server, tool, op, error_type, message, latency_ms,
+            when or datetime(2026, 8, 5, 2, 0, 0), journey)
+
+
+def test_failures_from_mysql(client, auth_headers, monkeypatch):
+    """failures 从 MySQL calls 表读，journey JSON 解析为 list，结构与旧 Redis 版一致。"""
+    monkeypatch.setattr("api.dashboard.get_pool", _fake_pool(fetchall=[_fail_row()]))
     resp = client.get("/api/failures?limit=10", headers=auth_headers)
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) == 1
-    assert data[0]["trace"] == "abc"
-    assert data[0]["error_type"] == "upstream_timeout"
+    rec = data[0]
+    assert rec["trace"] == "abc"
+    assert rec["server"] == "zabbix"
+    assert rec["tool"] == "list"
+    assert rec["op"] == "read"
+    assert rec["error_type"] == "upstream_timeout"
+    assert rec["message"] == "timeout"
+    assert rec["latency_ms"] == 30
+    # journey 必须是解析后的 list（前端「查看轨迹」直接消费）
+    assert rec["journey"] == [{"stage": "auth", "state": "fail", "ms": 30}]
+    # time 保持 Redis 时代的 ISO+Z 格式（前端 ago() 按 UTC 解析）
+    assert rec["time"] == "2026-08-05T02:00:00Z"
+
+
+def test_failures_mysql_query_shape(client, auth_headers, monkeypatch):
+    """SQL 必须参数化：status 过滤 + LIMIT/OFFSET 占位符，server 未传不进 WHERE。"""
+    captured = []
+    monkeypatch.setattr("api.dashboard.get_pool", _fake_pool(fetchall=[], capture=captured))
+    resp = client.get("/api/failures?limit=20&offset=5", headers=auth_headers)
+    assert resp.status_code == 200
+    sql, args = captured[0]
+    assert "status = %s" in sql
+    assert "ORDER BY id DESC" in sql
+    assert args == ["fail", 20, 5]
+    assert "server" not in sql.split("WHERE")[1].split("ORDER")[0].replace("server = %s", "")
+
+
+def test_failures_server_filter(client, auth_headers, monkeypatch):
+    """server 参数传播到 WHERE + args。"""
+    captured = []
+    monkeypatch.setattr("api.dashboard.get_pool", _fake_pool(fetchall=[], capture=captured))
+    resp = client.get("/api/failures?server=zabbix-mcp", headers=auth_headers)
+    assert resp.status_code == 200
+    sql, args = captured[0]
+    assert "server = %s" in sql
+    assert args == ["fail", "zabbix-mcp", 50, 0]
+
+
+def test_failures_bad_journey_json(client, auth_headers, monkeypatch):
+    """journey 列脏数据（非法 JSON）-> 返回 []，不让面板 500。"""
+    monkeypatch.setattr("api.dashboard.get_pool", _fake_pool(
+        fetchall=[_fail_row(journey="not-json{{")]))
+    resp = client.get("/api/failures", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()[0]["journey"] == []
+
+
+def test_failures_empty(client, auth_headers, monkeypatch):
+    """无失败行 -> 空列表。"""
+    monkeypatch.setattr("api.dashboard.get_pool", _fake_pool(fetchall=[]))
+    resp = client.get("/api/failures", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json() == []

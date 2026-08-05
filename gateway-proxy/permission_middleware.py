@@ -26,7 +26,13 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from opentelemetry import trace
 
 from auth import verify_token, check_permission
-from middleware import check_call_permission, classify_error, record_call_failure, record_call_audit
+from middleware import (
+    build_journey,
+    check_call_permission,
+    classify_error,
+    record_call_audit,
+    record_call_failure,
+)
 from routing import resolve_target, UnknownServerError
 # CRITICAL: import the module (not `from observability import ...`) so that
 # attribute access resolves at CALL TIME, picking up the post-init_telemetry()
@@ -62,6 +68,19 @@ def _current_trace_id() -> str:
     if ctx and ctx.is_valid:
         return f"{ctx.trace_id:032x}"
     return uuid.uuid4().hex
+
+
+def _resolve_server_name(mcp_name: str) -> str:
+    """Best-effort 解析工具名对应的 server 名，解析失败返回 ""。
+
+    供 build_journey 决定轨迹末段 stage 名（真实 server 名或回退 "backend"），
+    与 record_call_failure 内部的 resolve 容错语义保持一致。
+    """
+    try:
+        server, _, _ = resolve_target(mcp_name)
+        return server
+    except (ValueError, UnknownServerError):
+        return ""
 
 
 class PermissionMiddleware(Middleware):
@@ -108,18 +127,26 @@ class PermissionMiddleware(Middleware):
 
         if not allowed:
             latency_ms = int((time.monotonic() - start) * 1000)
+            fail_stage = "auth" if error_type == "invalid_token" else "route"
+            message = f"Denied: {tool_name}"
             # Record the failure audit (journey stops at 'auth' or 'route').
             await record_call_failure(
                 token_info=token_info,
                 mcp_name=tool_name,
                 error_type=error_type,
-                message=f"Denied: {tool_name}",
+                message=message,
                 latency_ms=latency_ms,
                 trace_id=trace_id,
-                fail_stage="auth" if error_type == "invalid_token" else "route",
+                fail_stage=fail_stage,
             )
-            # 双写：Redis failures 流 + MySQL calls 表（失败条目两处都记）
-            await record_call_audit(token_info, tool_name, latency_ms, trace_id, "fail", error_type)
+            # 双写：Redis failures 流 + MySQL calls 表（失败条目两处都记）。
+            # MySQL 行带上 message+journey：失败面板已改读 calls 表，
+            # 前端「查看轨迹」依赖行内 journey 字段
+            await record_call_audit(
+                token_info, tool_name, latency_ms, trace_id, "fail", error_type,
+                message=message,
+                journey=build_journey(fail_stage, _resolve_server_name(tool_name), latency_ms),
+            )
             # Metrics: count the auth failure + record latency.
             if observability.AUTH_FAILURES:
                 observability.AUTH_FAILURES.add(1, {"error_type": error_type})
@@ -136,17 +163,23 @@ class PermissionMiddleware(Middleware):
         except Exception as exc:
             latency_ms = int((time.monotonic() - start) * 1000)
             err_type = classify_error(exc)
+            fail_stage = tool_name.split("_", 1)[0] if "_" in tool_name else "backend"
+            message = str(exc)
             await record_call_failure(
                 token_info=token_info,
                 mcp_name=tool_name,
                 error_type=err_type,
-                message=str(exc),
+                message=message,
                 latency_ms=latency_ms,
                 trace_id=trace_id,
-                fail_stage=tool_name.split("_", 1)[0] if "_" in tool_name else "backend",
+                fail_stage=fail_stage,
             )
-            # 双写：Redis failures 流 + MySQL calls 表
-            await record_call_audit(token_info, tool_name, latency_ms, trace_id, "fail", err_type)
+            # 双写：Redis failures 流 + MySQL calls 表（含 message+journey，同上）
+            await record_call_audit(
+                token_info, tool_name, latency_ms, trace_id, "fail", err_type,
+                message=message,
+                journey=build_journey(fail_stage, _resolve_server_name(tool_name), latency_ms),
+            )
             if observability.REQUESTS_TOTAL:
                 observability.REQUESTS_TOTAL.add(1, {"status": "error"})
             if observability.REQUEST_LATENCY:

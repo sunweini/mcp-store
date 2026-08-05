@@ -59,19 +59,36 @@ async def record_failure(
         logger.error("audit_write_failed", error=str(e), service="gateway-proxy")
 
 
-async def record_call(meta: dict, status: str, error_type: str | None = None) -> None:
-    """INSERT 调用记录到 MySQL calls 表。旁路：失败仅记日志不阻断。"""
+async def record_call(
+    meta: dict,
+    status: str,
+    error_type: str | None = None,
+    message: str | None = None,
+    journey: list | str | None = None,
+) -> None:
+    """INSERT 调用记录到 MySQL calls 表。旁路：失败仅记日志不阻断。
+
+    message/journey 仅失败行非空（on_call_tool 失败路径写入），
+    供 admin 失败面板展示错误信息与请求轨迹；成功行留空默认值。
+    """
+    # journey 传入 list（build_journey 产物）时序列化为 JSON 字符串入 TEXT 列；
+    # 已是字符串则原样用，缺省落 '[]' 保证前端 json.loads 不炸
+    if isinstance(journey, list):
+        journey_str = json.dumps(journey)
+    else:
+        journey_str = journey or "[]"
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "INSERT INTO calls (time, server, tool, op, token_name, "
-                    "latency_ms, status, error_type, trace) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    "latency_ms, status, error_type, trace, message, journey) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (meta["time"], meta["server"], meta["tool"], meta["op"],
                      meta["token_name"], meta["latency_ms"], status,
-                     error_type or "", meta["trace_id"]),
+                     error_type or "", meta["trace_id"],
+                     message or "", journey_str),
                 )
     except Exception as e:
         logger.error("audit_call_write_failed", error=str(e), service="gateway-proxy")
