@@ -276,10 +276,47 @@ def test_usage_report(client, fake_redis, auth_headers):
 
 
 async def test_probe_tavily_ok_and_remaining():
+    """usage 新 schema：account.plan_limit / account.plan_usage（与 calibrate 同口径）。"""
     from api.keys import _probe_key
 
     def handler(request):
         if request.url.path == "/usage":
+            return httpx.Response(200, json={
+                "account": {"plan_usage": 120, "plan_limit": 1000},
+            })
+        return httpx.Response(200, json={"answer": "ping"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        res = await _probe_key("tavily", "tvly-x", client=c)
+    assert res["ok"] is True
+    assert res["remaining"] == 880
+
+
+async def test_probe_tavily_usage_overage_clamps_to_zero():
+    """plan_usage > plan_limit（超用套餐）→ remaining clamp 0，不产生负数。"""
+    from api.keys import _probe_key
+
+    def handler(request):
+        if request.url.path == "/usage":
+            return httpx.Response(200, json={
+                "account": {"plan_usage": 1200, "plan_limit": 1000},
+            })
+        return httpx.Response(200, json={"answer": "ping"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
+        res = await _probe_key("tavily", "tvly-x", client=c)
+    assert res["ok"] is True
+    assert res["remaining"] == 0
+
+
+async def test_probe_tavily_usage_missing_account_fields_remaining_none():
+    """usage 响应缺 account.plan_* 字段（schema 漂移/旧 schema）→ remaining=None，
+    但探活本身成功（查询已验证 key 有效，余量取不到不应算失败）。"""
+    from api.keys import _probe_key
+
+    def handler(request):
+        if request.url.path == "/usage":
+            # 旧 schema monthly_usage.*：新代码不认，remaining 保持 None
             return httpx.Response(200, json={
                 "monthly_usage": {"current_usage": 120, "max_usage": 1000},
             })
@@ -288,7 +325,7 @@ async def test_probe_tavily_ok_and_remaining():
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as c:
         res = await _probe_key("tavily", "tvly-x", client=c)
     assert res["ok"] is True
-    assert res["remaining"] == 880
+    assert res["remaining"] is None
 
 
 async def test_probe_tavily_unauthorized():

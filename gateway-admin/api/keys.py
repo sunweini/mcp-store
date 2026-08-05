@@ -102,7 +102,8 @@ async def calibrate_keys(_: str = Depends(require_admin)):
     必须注册在 POST /{provider} 之前——FastAPI 按注册顺序匹配，否则
     "calibrate" 会被当成 provider 路径参数落入 add_key（422）。
     """
-    # brave 无公开用量接口，calibrate_provider 内部返回 supported=false 且不碰记录
+    # brave 借真实搜索响应头读月窗口配额（每次校准每 key 消耗 1 次官方
+    # 配额）；仅未知 provider 才 supported=false
     return [await calibrate_provider(p) for p in PROVIDERS]
 
 
@@ -263,11 +264,15 @@ async def _probe_key(provider: str, key: str, client: httpx.AsyncClient | None =
                                          headers={"Authorization": f"Bearer {key}"})
                 if usage.status_code == 200 and usage.content:
                     body = usage.json()
-                    cur = body.get("monthly_usage", {}).get("current_usage")
-                    mx = body.get("monthly_usage", {}).get("max_usage")
-                    if isinstance(cur, int) and isinstance(mx, int) and mx:
-                        # 顺带写 remaining，管理界面免猜官方余量
-                        remaining = max(mx - cur, 0)
+                    # 与 calibrate.fetch_tavily_usage 同口径：配额在 account 级
+                    # （同账号多 key 共享套餐）；旧 monthly_usage.* schema 已废弃
+                    account = body.get("account") or {}
+                    plan_limit = account.get("plan_limit")
+                    plan_usage = account.get("plan_usage")
+                    if isinstance(plan_limit, int) and isinstance(plan_usage, int):
+                        # 顺带写 remaining，管理界面免猜官方余量；超用时
+                        # clamp 0（负数会弄坏 usage 端点/ratio 计算）
+                        remaining = max(plan_limit - plan_usage, 0)
             except Exception:
                 # 查询成功但 usage 拉取失败：不算探活失败，仅剩 remaining=None
                 pass

@@ -8,9 +8,11 @@ quota 算低配额档位）拿到的就是权威数字。
 失败语义：官方请求失败只在该 key 记 error，绝不改存储记录——provider
 瞬时故障不能把已有的配额数据抹掉（宁要旧值，不要空值）。
 
-brave 无公开用量接口：supported=False，记录完全不碰（本地计数即事实源）。
+brave 无独立 usage 端点：借一次真实搜索的响应头（x-ratelimit-policy /
+x-ratelimit-remaining）读月窗口配额，每次校准每 key 消耗 1 次官方配额。
 """
 import json
+import os
 
 import httpx
 import structlog
@@ -107,6 +109,72 @@ async def fetch_serpapi_usage(key: str, client: httpx.AsyncClient | None = None)
             await client.aclose()
 
 
+async def fetch_brave_usage(key: str, client: httpx.AsyncClient | None = None) -> dict | None:
+    """Brave 官方用量：借一次真实搜索的响应头读配额（无独立 usage 端点）。
+
+    每次搜索响应都带多窗口限流头（位置一一对应）：
+      x-ratelimit-policy:    "1;w=1, 2000;w=2678400"  # limit;w=窗口秒数
+      x-ratelimit-remaining: "0, 1977"
+    取 window 最大的段（月窗口 w≈2678400）作为 quota/remaining——秒级
+    窗口只限突发速率，对配额管理无意义。
+
+    代价：必须发一次真实请求才有头（消耗 1 次官方配额）；校准为人工
+    低频触发，可接受。
+
+    返回 {"quota": int, "remaining": int}；缺头/格式不解析/长度不对齐/
+    非 200/网络异常均返回 None（调用方语义：不改值）。
+    """
+    owns_client = client is None
+    if owns_client:
+        # 与 keys._probe_key 同一网络约束：api.search.brave.com 直连不通，
+        # 必须走 SEARCH_PROXY；calibrate_provider 传入的共享 client 同理
+        client = httpx.AsyncClient(timeout=CALIBRATE_TIMEOUT,
+                                   proxy=os.environ.get("SEARCH_PROXY") or None)
+    try:
+        resp = await client.get("https://api.search.brave.com/res/v1/web/search",
+                                params={"q": "test", "count": 1},
+                                headers={"X-Subscription-Token": key})
+        if resp.status_code != 200:
+            logger.warning("calibrate_fetch_failed", provider="brave",
+                           status=resp.status_code, service="gateway-admin")
+            return None
+        policy_raw = resp.headers.get("x-ratelimit-policy")
+        remaining_raw = resp.headers.get("x-ratelimit-remaining")
+        if not policy_raw or not remaining_raw:
+            # 响应没带限流头（schema 变更/边缘节点异常）：拒绝写入猜测值
+            logger.warning("calibrate_bad_schema", provider="brave",
+                           reason="missing_ratelimit_headers", service="gateway-admin")
+            return None
+        try:
+            # 官方分隔是 ", "，按 "," split + strip 兼容无空格变体
+            policy = []
+            for seg in policy_raw.split(","):
+                limit_part, sep, window_part = seg.strip().partition(";w=")
+                if not sep:
+                    raise ValueError(f"bad policy segment: {seg!r}")
+                policy.append((int(limit_part), int(window_part)))
+            remaining = [int(p.strip()) for p in remaining_raw.split(",")]
+        except ValueError:
+            logger.warning("calibrate_bad_schema", provider="brave",
+                           reason="unparsable_ratelimit_headers", service="gateway-admin")
+            return None
+        if len(policy) != len(remaining):
+            # 位置对应是解析前提；长度不齐说明格式漂移，无法对齐两列
+            logger.warning("calibrate_bad_schema", provider="brave",
+                           reason="policy_remaining_length_mismatch", service="gateway-admin")
+            return None
+        # w 最大即月窗口；remaining 异常为负时 clamp 0（与其余 fetcher 一致）
+        i = max(range(len(policy)), key=lambda idx: policy[idx][1])
+        return {"quota": policy[i][0], "remaining": max(remaining[i], 0)}
+    except Exception as e:
+        logger.warning("calibrate_fetch_failed", provider="brave",
+                       error=str(e), service="gateway-admin")
+        return None
+    finally:
+        if owns_client:
+            await client.aclose()
+
+
 async def calibrate_provider(provider: str) -> dict:
     """校准单个 provider 的全部 key，返回摘要。
 
@@ -123,8 +191,11 @@ async def calibrate_provider(provider: str) -> dict:
         fetcher = fetch_tavily_usage
     elif provider == "serpapi":
         fetcher = fetch_serpapi_usage
+    elif provider == "brave":
+        # brave 无独立 usage 端点，fetcher 借真实搜索响应头读月窗口配额
+        fetcher = fetch_brave_usage
     else:
-        # brave（及未知 provider）无官方用量接口：连 Redis 记录都不读，
+        # 未知 provider 无官方用量接口：连 Redis 记录都不读，
         # 本地计数就是事实源，校准不产生任何副作用
         return {"provider": provider, "supported": False, "keys": []}
 
@@ -132,8 +203,11 @@ async def calibrate_provider(provider: str) -> dict:
     entries = await r.hgetall(f"search:keys:{provider}")
     keys_out: list[dict] = []
     updated_ids: list[str] = []
+    # brave 必须走 SEARCH_PROXY（域名直连不通，与 keys._probe_key 同一
+    # 网络约束）；tavily/serpapi 直连可达，不绕代理多一跳
+    proxy = (os.environ.get("SEARCH_PROXY") or None) if provider == "brave" else None
     # 同一 provider 全部 key 共用一个 client：复用连接，超时统一
-    async with httpx.AsyncClient(timeout=CALIBRATE_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=CALIBRATE_TIMEOUT, proxy=proxy) as client:
         for key_id, payload in entries.items():
             try:
                 rec = json.loads(payload)
