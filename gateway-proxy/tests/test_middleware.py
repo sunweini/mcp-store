@@ -2,7 +2,12 @@
 import pytest
 import httpx
 
-from middleware import build_journey, check_call_permission, classify_error
+from middleware import (
+    build_journey,
+    check_call_permission,
+    classify_error,
+    record_call_audit,
+)
 from routing import register_tools, clear_tools
 
 
@@ -90,3 +95,62 @@ def test_build_journey_unmatched_stage_all_ok():
     """fail_stage 不匹配任何 stage -> 全 ok（与旧内联实现的边界行为一致）。"""
     journey = build_journey("nowhere", "zabbix", 1)
     assert all(s["state"] == "ok" for s in journey)
+
+
+# ─── record_call_audit: 未注册 server 仍能解析 server/tool ─────────
+# 生产 bug：server 禁用后从 TOOL_REGISTRY 卸载，resolve_target 抛
+# UnknownServerError，审计记录 server/tool 落空。修复后由 split_prefix
+# （纯前缀切分，不查 registry）解析，op 在 registry 缺失时默认 read。
+
+async def test_record_call_audit_ghost_server_resolved(monkeypatch):
+    """server 未注册（禁用后 registry 卸载）时，calls 行仍带 server/tool。"""
+    rows = []
+
+    async def fake_record_call(meta, status, error_type=None, message=None, journey=None):
+        rows.append({"meta": meta, "status": status, "error_type": error_type})
+
+    monkeypatch.setattr("middleware.record_call", fake_record_call)
+    # 不注册 ghost-mcp：模拟禁用后从 TOOL_REGISTRY 卸载的状态
+    await record_call_audit(
+        token_info={"name": "tok"},
+        mcp_name="ghost-mcp_web_search",
+        latency_ms=1,
+        trace_id="trace-ghost",
+        status="fail",
+        error_type="permission_denied",
+        message="Denied: ghost-mcp_web_search",
+    )
+    assert len(rows) == 1
+    meta = rows[0]["meta"]
+    assert meta["server"] == "ghost-mcp"
+    assert meta["tool"] == "web_search"
+    assert meta["op"] == "read"  # resolve_target 失败 -> 默认 read
+    assert rows[0]["status"] == "fail"
+    assert rows[0]["error_type"] == "permission_denied"
+
+
+async def test_record_call_audit_ghost_server_op_registry_lookup(monkeypatch):
+    """server 未注册时 op 降级 read；正常注册路径 op 仍取 registry 的 mode。"""
+    rows = []
+
+    async def fake_record_call(meta, status, error_type=None, message=None, journey=None):
+        rows.append(meta)
+
+    monkeypatch.setattr("middleware.record_call", fake_record_call)
+
+    # ghost 未注册 -> op 默认 read
+    await record_call_audit(
+        token_info=None, mcp_name="ghost-mcp_web_search",
+        latency_ms=1, trace_id="t1", status="fail",
+        error_type="permission_denied", message="Denied",
+    )
+    assert rows[-1]["op"] == "read"
+
+    # zabbix 已注册 write 工具 -> op 取真实 mode（fixture 已注册）
+    await record_call_audit(
+        token_info=None, mcp_name="zabbix_create_maintenance",
+        latency_ms=1, trace_id="t2", status="ok",
+    )
+    assert rows[-1]["server"] == "zabbix"
+    assert rows[-1]["tool"] == "create_maintenance"
+    assert rows[-1]["op"] == "write"

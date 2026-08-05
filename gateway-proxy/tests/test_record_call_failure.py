@@ -112,11 +112,12 @@ async def test_record_call_failure_anonymous_token(fake_redis):
 
 async def test_record_call_failure_unresolvable_name(fake_redis):
     """When mcp_name can't be split (no underscore), journey uses 'backend' stage."""
-    # Clear the registry so resolve_target fails too.
-    clear_tools("zabbix")
+    # 无下划线 -> split_prefix 抛 ValueError，server/tool 保持空、op 默认 read。
+    # 注意名字本身不能含下划线：'no_namespace_here' 会被 split_prefix 切出
+    # server='no'（新语义），那样就到不了 ValueError 分支。
     await record_call_failure(
         token_info={"name": "tok"},
-        mcp_name="no_namespace_here",
+        mcp_name="rootlevel",
         error_type="permission_denied",
         message="unknown",
         latency_ms=2,
@@ -130,6 +131,35 @@ async def test_record_call_failure_unresolvable_name(fake_redis):
     # server is "" so stages list uses "backend" as the last stage name.
     assert journey[4]["stage"] == "backend"
     assert journey[3] == {"stage": "route", "state": "fail", "ms": 2}
-    # server/tool fields are empty strings (resolve_target failed).
+    # server/tool fields are empty strings (split_prefix failed).
     assert fields["server"] == ""
     assert fields["tool"] == ""
+    assert fields["op"] == "read"
+
+
+async def test_record_call_failure_ghost_server_resolved(fake_redis):
+    """server 未注册（禁用后 registry 卸载）时，server/tool 仍解析出来。
+
+    生产 bug：server 禁用后 resolve_target 抛 UnknownServerError，审计字段
+    落空。修复后 server/tool 由 split_prefix（纯前缀切分，不查 registry）
+    解析；op 在 registry 缺失时默认 read。
+    """
+    # 不注册 ghost-mcp：模拟禁用后从 TOOL_REGISTRY 卸载的状态
+    await record_call_failure(
+        token_info={"name": "tok"},
+        mcp_name="ghost-mcp_web_search",
+        error_type="permission_denied",
+        message="Denied: ghost-mcp_web_search",
+        latency_ms=2,
+        trace_id="trace-ghost",
+        fail_stage="route",
+    )
+    entries = await fake_redis.xrange("audit:failures")
+    _, fields = entries[0]
+    journey = json.loads(fields["journey"])
+
+    assert fields["server"] == "ghost-mcp"
+    assert fields["tool"] == "web_search"
+    assert fields["op"] == "read"  # resolve_target 失败 -> 默认 read
+    # journey 末段用真实 server 名而非回退 'backend'
+    assert journey[4]["stage"] == "ghost-mcp"

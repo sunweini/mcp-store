@@ -33,7 +33,7 @@ from middleware import (
     record_call_audit,
     record_call_failure,
 )
-from routing import resolve_target, UnknownServerError
+from routing import resolve_target, split_prefix, UnknownServerError
 # CRITICAL: import the module (not `from observability import ...`) so that
 # attribute access resolves at CALL TIME, picking up the post-init_telemetry()
 # values. A `from` import snapshots the names at import time (all None, because
@@ -76,10 +76,13 @@ def _resolve_server_name(mcp_name: str) -> str:
     供 build_journey 决定轨迹末段 stage 名（真实 server 名或回退 "backend"），
     与 record_call_failure 内部的 resolve 容错语义保持一致。
     """
+    # split_prefix 只按第一个 _ 切分，不依赖 TOOL_REGISTRY：server 禁用
+    # （unmount）后也能解析出真实 server 名，与 record_call_failure 同步
+    # （record_call_audit 收到的 journey 用同一 server 名，两处 stage 一致）
     try:
-        server, _, _ = resolve_target(mcp_name)
+        server, _ = split_prefix(mcp_name)
         return server
-    except (ValueError, UnknownServerError):
+    except ValueError:
         return ""
 
 
