@@ -36,6 +36,8 @@ export function addSearchKey(provider, data) { return apiFetch(`/api/search-keys
 export function updateSearchKey(provider, keyId, data) { return apiFetch(`/api/search-keys/${provider}/${keyId}`, { method:'PUT', body:JSON.stringify(data) }) }
 export function deleteSearchKey(provider, keyId) { return apiFetch(`/api/search-keys/${provider}/${keyId}`, { method:'DELETE' }) }
 export function getSearchKeyUsage(provider)  { return apiFetch(`/api/search-keys/${provider}/usage`) }
+// 官方用量校准：tavily/serpapi 拉官方接口同步 quota/remaining（brave 无接口，后端返回 supported=false）
+export function calibrateKeys()              { return apiFetch('/api/search-keys/calibrate', { method:'POST' }) }
 
 // ── Call audit log (MySQL calls 表) ──────────────
 export function getCalls(params = {}) {

@@ -16,10 +16,18 @@
           <span v-if="p.warnCount" class="badge" :title="`${p.warnCount} 个 key 低配额/失效`">{{ p.warnCount }}</span>
         </button>
       </div>
-      <button class="btn btn-primary" @click="openAdd">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-        添加 Key
-      </button>
+      <div class="header-actions">
+        <!-- 官方用量校准：tavily/serpapi 拉官方接口同步 quota/remaining；
+             brave 无公开用量接口，后端跳过（摘要里标"跳过"） -->
+        <button class="btn btn-ghost" :disabled="calibrating || loading" @click="calibrate">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+          {{ calibrating ? '校准中…' : '校准' }}
+        </button>
+        <button class="btn btn-primary" @click="openAdd">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+          添加 Key
+        </button>
+      </div>
     </div>
 
     <!-- Notice / error banners -->
@@ -89,7 +97,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { getSearchKeys, addSearchKey, updateSearchKey, deleteSearchKey, getSearchKeyUsage } from '../api/index.js'
+import { getSearchKeys, addSearchKey, updateSearchKey, deleteSearchKey, getSearchKeyUsage, calibrateKeys } from '../api/index.js'
 import Modal from '../components/Modal.vue'
 
 /* ── 状态映射（集中管理，页面其它地方不散落状态字符串）──
@@ -125,6 +133,7 @@ const providers = reactive([
 const usageMap = ref({ tavily: {}, brave: {}, serpapi: {} })
 const loading = ref(false)
 const saving = ref(false)
+const calibrating = ref(false)
 const error = ref('')
 const notice = ref('')
 const addModal = ref(null)
@@ -246,11 +255,44 @@ async function removeKey(k) {
   }
 }
 
+// 官方用量校准：串行逐源拉官方接口（后端），完成后全量 reload
+// （三源的 quota/remaining 都可能变，只刷当前 tab 会漏）
+async function calibrate() {
+  calibrating.value = true
+  error.value = ''
+  notice.value = ''
+  try {
+    const results = await calibrateKeys()
+    await loadAll()
+    notice.value = summarizeCalibration(results || [])
+  } catch (e) {
+    error.value = '校准失败: ' + e.message
+  } finally {
+    calibrating.value = false
+  }
+}
+
+// 摘要：每源 updated N / failed M / skipped（brave 无官方接口）
+function summarizeCalibration(results) {
+  const parts = results.map(r => {
+    if (!r.supported) return `${r.provider} 跳过（无官方用量接口）`
+    const updated = (r.keys || []).filter(k => !k.error).length
+    const failed = (r.keys || []).filter(k => k.error).length
+    let s = `${r.provider} 更新 ${updated}`
+    if (failed) s += ` / 失败 ${failed}`
+    return s
+  })
+  return '校准完成 · ' + parts.join(' · ')
+}
+
 /* ── lifecycle ── */
 onMounted(loadAll)
 </script>
 
 <style scoped>
+/* ── 页头右侧操作区（校准 + 添加并排）── */
+.header-actions { display: flex; gap: 8px; align-items: center; }
+
 /* ── 源 tab ── */
 .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .tab {

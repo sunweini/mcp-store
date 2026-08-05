@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from auth import require_admin
+from calibrate import calibrate_provider
 from redis_client import get_redis
 
 logger = structlog.get_logger()
@@ -92,6 +93,17 @@ async def list_keys(provider: str, _: str = Depends(require_admin)):
         rec["month_usage"] = await _month_usage(provider, key_id)
         out.append(rec)
     return out
+
+
+@router.post("/calibrate")
+async def calibrate_keys(_: str = Depends(require_admin)):
+    """官方用量校准：逐源拉官方 usage 接口同步 monthly_quota + remaining。
+
+    必须注册在 POST /{provider} 之前——FastAPI 按注册顺序匹配，否则
+    "calibrate" 会被当成 provider 路径参数落入 add_key（422）。
+    """
+    # brave 无公开用量接口，calibrate_provider 内部返回 supported=false 且不碰记录
+    return [await calibrate_provider(p) for p in PROVIDERS]
 
 
 @router.post("/{provider}", status_code=201)
