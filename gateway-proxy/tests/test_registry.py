@@ -9,6 +9,7 @@ from registry import (
     mount_all,
 )
 import json
+import pytest
 import routing
 
 
@@ -145,3 +146,39 @@ async def test_mount_one_url_unreachable(fake_redis):
     # Cleanup.
     await _unmount_one(gateway, "zabbix")
     assert "zabbix" not in routing.TOOL_REGISTRY
+
+
+# ─── status 挂载控制 ─────────────────────────────────────────────
+
+@pytest.fixture
+def mount_log(monkeypatch):
+    """记录 _mount_one/_unmount_one 调用，避免真连后端。"""
+    import registry
+    log = {"mount": [], "unmount": []}
+    async def fake_mount(gw, name, url): log["mount"].append((name, url))
+    async def fake_unmount(gw, name): log["unmount"].append(name)
+    monkeypatch.setattr(registry, "_mount_one", fake_mount)
+    monkeypatch.setattr(registry, "_unmount_one", fake_unmount)
+    return log
+
+
+class FakeGW: pass
+
+
+async def test_mount_all_skips_non_active(fake_redis, mount_log):
+    import registry
+    await fake_redis.sadd("servers:active", "a", "b", "c")
+    await fake_redis.hset("servers:a", mapping={"url": "http://a", "status": "active"})
+    await fake_redis.hset("servers:b", mapping={"url": "http://b", "status": "disabled"})
+    await fake_redis.hset("servers:c", mapping={"url": "http://c", "status": "stopped"})
+    await registry.mount_all(FakeGW())
+    assert mount_log["mount"] == [("a", "http://a")]
+
+
+async def test_mount_all_default_active_when_no_status(fake_redis, mount_log):
+    """旧数据无 status 字段 -> 默认 active（兼容）。"""
+    import registry
+    await fake_redis.sadd("servers:active", "old")
+    await fake_redis.hset("servers:old", mapping={"url": "http://old"})
+    await registry.mount_all(FakeGW())
+    assert mount_log["mount"] == [("old", "http://old")]

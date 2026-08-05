@@ -105,6 +105,24 @@ async def mount_all(gateway) -> None:
         if not url:
             logger.warning("mount_all_skip", server=name, reason="missing url", service="gateway-proxy")
             continue
+        # 仅 active 挂载；旧数据无 status 字段默认 active（向后兼容）。
+        # disabled/stopped 的 server 留在 servers:active set 里但不挂载，
+        # 重启后保持未挂载状态而不是被意外恢复。
+        status = info.get("status", "active")
+        if status != "active":
+            logger.warning("mount_all_skip", server=name, reason=f"status={status}", service="gateway-proxy")
+            continue
+        await _mount_one(gateway, name, url)
+
+
+async def _sync_one(gateway, name: str, info: dict) -> None:
+    """按 status 同步挂载：先卸载，仅 active 且有 url 才挂载。
+
+    先 unmount 再 mount 保证 disable->enable 切换后 provider 是新的。
+    """
+    await _unmount_one(gateway, name)
+    url = info.get("url")
+    if info.get("status", "active") == "active" and url:
         await _mount_one(gateway, name, url)
 
 
@@ -192,14 +210,11 @@ async def watch_changes(gateway) -> None:
                 continue
             action, name = parsed
             info = await r.hgetall(f"servers:{name}")
-            if action in ("add", "update") and info:
-                url = info.get("url")
-                if not url:
-                    logger.warning("watch_changes_skip", server=name, reason="missing url", service="gateway-proxy")
-                    continue
+            if action == "remove":
                 await _unmount_one(gateway, name)
-                await _mount_one(gateway, name, url)
-            elif action == "remove":
-                await _unmount_one(gateway, name)
+            # enable/disable/stop 与 add/update 共用 _sync_one：统一按 hash 里
+            # 的最新 status 决定挂载/卸载，避免每种 action 各写一份状态判断。
+            elif action in ("add", "update", "enable", "disable", "stop") and info:
+                await _sync_one(gateway, name, info)
         except Exception as e:
             logger.error("watch_changes_event_failed", error=str(e), service="gateway-proxy")
