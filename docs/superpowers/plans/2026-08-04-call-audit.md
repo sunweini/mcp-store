@@ -109,7 +109,14 @@ MYSQL_DATABASE=mcp_audit
     restart: unless-stopped
 ```
 
-给 gateway-proxy 和 gateway-admin 服务加 env_file `./config/mysql.env` + environment `MYSQL_URL: mysql://mcp:$$MYSQL_PASSWORD@mysql:3306/mcp_audit`（注意 compose 里 `$$` 转义）。
+给 gateway-proxy 和 gateway-admin 服务加 `env_file: ./config/mysql.env`（MYSQL_URL 直接写在 mysql.env 里，避免 compose `environment:` 不从 env_file 插值的问题）。mysql.env 含：
+```
+MYSQL_ROOT_PASSWORD=...
+MYSQL_USER=mcp
+MYSQL_PASSWORD=...
+MYSQL_DATABASE=mcp_audit
+MYSQL_URL=mysql://mcp:<同 MYSQL_PASSWORD>@mysql:3306/mcp_audit
+```
 
 - [ ] **Step 4: deploy.sh 加 mysql 日志目录**（`deploy/deploy.sh` 的 mkdir 行加 `"$LOGS_DIR/mysql"`，env 检查段加 mysql.env）
 
