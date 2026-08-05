@@ -132,3 +132,27 @@ async def refresh_tools(name: str, _: str = Depends(require_admin)):
     tools = await introspect_tools(data["url"])
     await r.hset(f"servers:{name}", "tools", json.dumps(tools))
     return {"name": name, "tools": tools}
+
+
+_LIFECYCLE = {"disable": "disabled", "stop": "stopped", "enable": "active"}
+
+
+class LifecycleAction(BaseModel):
+    action: str
+
+
+@router.post("/{name}/lifecycle")
+async def set_lifecycle(name: str, req: LifecycleAction, _: str = Depends(require_admin)):
+    """禁用/停用/启用 server：只改 status + 通知 gateway 热更新。
+
+    停/起容器为人工操作（admin 不控 docker），此端点只管 gateway 清单。
+    """
+    r = get_redis()
+    if not await r.exists(f"servers:{name}"):
+        raise HTTPException(status_code=404, detail="server not found")
+    if req.action not in _LIFECYCLE:
+        raise HTTPException(status_code=422, detail=f"action must be one of {list(_LIFECYCLE)}")
+    status = _LIFECYCLE[req.action]
+    await r.hset(f"servers:{name}", "status", status)
+    await _publish_change(req.action, name)
+    return {"name": name, "status": status}
