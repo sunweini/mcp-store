@@ -8,7 +8,8 @@
 MCP Client -> gateway-proxy:8082 ──-> zabbix-mcp:9053 (告警巡检)
       ↑              │        ├──-> tavily-mcp:9050  (搜索 5 tools)
       │              │        ├──-> brave-mcp:9051   (搜索 2 tools)
-      │              │        └──-> serpapi-mcp:9052 (搜索 5 engines)
+      │              │        ├──-> serpapi-mcp:9052 (搜索 5 engines)
+      │              │        └──-> aliyun-dns-mcp:9054 (阿里云 DNS 6 tools)
       │              ↓
 gateway-admin:8081 (Server/Token/API Keys 管理 + 监控面板 + 请求日志)
       │
@@ -20,6 +21,7 @@ gateway-admin:8081 (Server/Token/API Keys 管理 + 监控面板 + 请求日志)
 - **gateway-admin**：管理 API + Vue 3 前端（Server/Token/API Keys 管理、监控面板、请求日志）
 - **存储分工**：Redis 管配置/状态（热数据），MySQL 管调用审计（聚合+明细，重启不丢）
 - **搜索 MCP**：多 API key 池（Redis 驱动），轮换 + 欠费剔除 + 低配额告警（<10% 前台提示 / <5% 兜底切换）
+- **aliyun-dns-mcp**：阿里云 DNS 多账户解析管理，账户级读写权限（MCP 为权威，gateway 零改动）
 
 ## 组件
 
@@ -31,6 +33,7 @@ gateway-admin:8081 (Server/Token/API Keys 管理 + 监控面板 + 请求日志)
 | `tavily-mcp/` | Tavily 搜索（search/extract/crawl/map/research） | 9050 |
 | `brave-mcp/` | Brave 搜索（web/local） | 9051 |
 | `serpapi-mcp/` | SerpAPI 搜索（google/bing/baidu/duckduckgo/ebay） | 9052 |
+| `aliyun-dns-mcp/` | 阿里云 DNS 多账户解析管理（账户级读写权限） | 9054 |
 | `deploy/` | Docker Compose 一键部署 | — |
 | `knowledge-base/` | FastMCP v4 官方文档 | — |
 | `docs/superpowers/` | 设计 spec + 实施计划 | — |

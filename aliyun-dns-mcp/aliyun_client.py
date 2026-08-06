@@ -57,6 +57,8 @@ def classify_error(exc: Exception) -> str:
 
 class AlidnsClient:
     def __init__(self, credentials: dict):
+        from darabonba.runtime import RuntimeOptions
+        self._runtime = RuntimeOptions()
         self._credentials = credentials
         self._sdk = self._make_sdk()
 
@@ -73,7 +75,11 @@ class AlidnsClient:
     async def _call(self, api_name: str, request, span_name: str):
         def run():
             fn = getattr(self._sdk, api_name)
-            return fn(request)
+            # with_options 签名 (request, runtime) 第二个参数必传——缺它
+            # 直接 TypeError（端到端验证实测：假凭证调用走到 SDK 层才发现）；
+            # runtime 默认空对象即可（重试/超时用默认值），统一在公共入口
+            # 注入，各工具方法不重复传
+            return fn(request, self._runtime)
 
         with tracer.start_as_current_span(span_name) as span:
             span.set_attribute("operation.type", "aliyun_api")

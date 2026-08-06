@@ -138,6 +138,39 @@ curl -X POST http://<host>:9054/mcp \
 - **network_error 兜底**（spec §7.1）：工具层只捕获 `AlidnsError`。`AliyunClient._call` 的 `except Exception` 已把所有 SDK 异常（含网络/超时）包成 `AlidnsError`（不匹配分类时落 `api_error`），网络错误不会 500，但 error_type 非精确 `network_error`；Redis 连接异常与意外 bug 冒泡由 FastMCP 转 is_error。小规模 + 内网部署风险低，保持现状
 - **httpx WARNING 防线**：httpx logger 提到 WARNING（SDK RPC URL query 含 AccessKeyId）。防线在 `logging_config.configure_logging`，任何不走它的进程会失去防线
 
+## 端到端验证
+
+- 验证日期：2026-08-06
+- 环境：本地 macOS，redis 6379 + aliyun-dns-mcp:9054 + gateway-proxy:8082 + gateway-admin:8081 四服务（无真实阿里云凭证，测试账户 AccessKey 用 `LTAI-test`/`sk-test`，验证到"阿里云 API 拒绝"即证明链路通）
+- 配置路径：管理 API 登录（admin/admin123）→ 注册 server（url `http://localhost:9054/mcp`）→ 添加账户 `test-acct`（probe:false）→ 创建 token `dns-ro`（server 级 read）→ 配授权矩阵（test-acct read:true write:false）
+
+### 关键验证 1：Authorization 头经 gateway 透传到 MCP ✅ 通过（完整链路）
+
+| 场景 | 命令 | 结果 |
+|---|---|---|
+| 不带 token 经 gateway 调 `list_accounts` | `curl -X POST localhost:8082/mcp -d '{"method":"tools/call",...}'`（无 Authorization） | `Permission denied: invalid_token` ✅ |
+| 带 token 经 gateway 调 `list_accounts` | 同上 + `Authorization: Bearer $TOK` | 返回 `[{"account_id":"test-acct","read":true,"write":false}]` ✅ |
+
+**结论：Authorization 头由 gateway-proxy 原样透传到 aliyun-dns-mcp，MCP 侧重新验证 token 成功**（返回账户数据而非权限错误）——spec §6.3「gateway 零改动」假设成立，无需走 §9 回退方案。带 token 后 MCP 内 `get_http_headers(include_all=True)` 路径被真实请求覆盖。
+
+### 关键验证 2：账户级读写 ✅ 通过（含热更新）
+
+| 场景 | 结果 |
+|---|---|
+| read 权限 token 调 `delete_record`（write 工具） | MCP 拒绝 `permission_denied` ✅（账户级校验生效，未经 gateway 粗闸放行到 API） |
+| 授权矩阵改 test-acct write 后（PUT /api/aliyun-perms，pubsub 热更新）调 `delete_record` | 穿透鉴权，到达真实阿里云 API：`error_type=invalid_credential`、`InvalidAccessKeyId.NotFound`（假凭证被 API 拒）✅ |
+| 同上 write 后调 `list_domains`（read 工具） | 同样到达 API 层 `invalid_credential` ✅ |
+
+### 实测发现并修复的缺陷（SDK 调用层）
+
+- **`with_options` 缺 runtime 参数**：真实 SDK 的 `delete_domain_record_with_options(request, runtime)` 第二个参数**必传**，此前 `_call` 只传 request → 假凭证调用时（唯一能触达 SDK 真实调用的场景）抛 `TypeError: missing 1 required positional argument: 'runtime'`，被 classify_error 兜底成 `api_error`。修复：`AlidnsClient.__init__` 构造 `RuntimeOptions()`（`darabonba.runtime`），`_call` 统一注入 `fn(request, self._runtime)`；`tests/test_aliyun_client.py` fake 签名改为 `(request, runtime)` 同构 + 新增 `test_with_options_gets_runtime` 回归，`tests/test_metrics.py` stub 同步。**该缺陷在单测里无法暴露**（fake 签名只有 request），端到端验证是唯一能抓到它的环节
+- 顺带验证：`InvalidAccessKeyId.NotFound` 被 `classify_error` 正确分类为 `invalid_credential`（Task 4 错误分类实测补全）
+
+### 局限
+
+- 未使用真实阿里云凭证，未验证真实域名操作（add/update/delete 到 API 层为止）；后续接真实账户时按「部署步骤」配好 AccessKey 后冒烟
+- gateway 审计写 MySQL 未在本机验证（本地无 MySQL，MYSQL_URL 未配，懒加载不触发）；容器部署由 compose 内置
+
 ## Changelog
 
 <!-- 每次发布追加 -->
@@ -145,3 +178,4 @@ curl -X POST http://<host>:9054/mcp \
 ### Unreleased
 
 - 初始版本：server 装配 + 6 tools + 账户级权限 + Redis 热更新 + telemetry/logging + 文档三件套
+- fix：`with_options` 补 runtime 参数（端到端验证实测 TypeError，`_call` 统一注入 `RuntimeOptions()`）

@@ -5,7 +5,8 @@
 - Docker 20.10+ 与 Docker Compose v2
 - 服务器 linux/amd64
 - 端口可用:8081(admin)、8082(proxy)、9465(proxy metrics)、
-  9466/9467/9468(搜索 MCP metrics: tavily/brave/serpapi)
+  9466/9467/9468(搜索 MCP metrics: tavily/brave/serpapi)、
+  9469(aliyun-dns-mcp metrics)
 
 ## 快速部署
 
@@ -50,6 +51,7 @@ bash deploy/init.sh
 | `deploy/logs/tavily-mcp/` | `/app/logs` | tavily-mcp 日志 |
 | `deploy/logs/brave-mcp/` | `/app/logs` | brave-mcp 日志 |
 | `deploy/logs/serpapi-mcp/` | `/app/logs` | serpapi-mcp 日志 |
+| `deploy/logs/aliyun-dns-mcp/` | `/app/logs` | aliyun-dns-mcp 日志 |
 
 ## 架构
 
@@ -58,11 +60,13 @@ bash deploy/init.sh
                       -> tavily-mcp:9050 (内部)
                       -> brave-mcp:9051  (内部)
                       -> serpapi-mcp:9052(内部)
+                      -> aliyun-dns-mcp:9054 (内部)
 :8081 -> gateway-admin (API + Vue UI)
 :9465 -> gateway-proxy metrics
 :9466 -> tavily-mcp metrics (容器内 9464)
 :9467 -> brave-mcp metrics (容器内 9464)
 :9468 -> serpapi-mcp metrics (容器内 9464)
+:9469 -> aliyun-dns-mcp metrics (容器内 9464)
 redis:6379 (内部,共享存储)
 ```
 
@@ -100,6 +104,7 @@ bash deploy/deploy.sh
 | tavily-mcp | `http://<host>:9466/metrics` | `search_*` 指标族（quota 告警） |
 | brave-mcp | `http://<host>:9467/metrics` | `search_*` 指标族 |
 | serpapi-mcp | `http://<host>:9468/metrics` | `search_*` 指标族 |
+| aliyun-dns-mcp | `http://<host>:9469/metrics` | `aliyndns_*` 指标族（请求/依赖延迟） |
 
 `search_quota_ratio{provider, level}` 按 provider 聚合（level:
 warning<10% / critical<5% / exhausted=0），配合 alertmanager 告警；

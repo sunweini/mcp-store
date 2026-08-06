@@ -8,6 +8,7 @@
 #   - zabbix-mcp / redis 不映射宿主端口(仅容器内网互访,减少攻击面)
 #   - 搜索 MCP metrics: 9466/9467/9468 -> 容器内 9464
 #     (tavily/brave/serpapi;宿主端避开 proxy 的 9465)
+#   - aliyun-dns-mcp metrics: 9469 -> 容器内 9464 (避开上面 9466-9468)
 #   - 搜索 MCP 的 MCP 端口 9050/9051/9052 不映射宿主(仅容器内网互访)
 #
 # 服务间互访: 用容器名 + 容器内端口(redis:6379, zabbix-mcp:9053, gateway-proxy:9465)
@@ -175,6 +176,26 @@ services:
       PROMETHEUS_PORT: "9464"
     volumes:
       - ./logs/serpapi-mcp:/app/logs
+    networks: [mcp-net]
+    depends_on: [redis]
+    restart: unless-stopped
+
+  # 阿里云 DNS 管理 MCP：容器内 9054 不映射宿主（仅容器内网互访）；
+  # metrics 9469 -> 容器内 9464（宿主端避开 proxy 9465 / 搜索 MCP 9466-9468）
+  # 无凭证 env——账户 AccessKey 由 gateway-admin「阿里云 DNS」页写入 Redis
+  aliyun-dns-mcp:
+    build: ../aliyun-dns-mcp
+    ports:
+      - "9469:9464"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "9054"
+      LOG_FORMAT: json
+      LOG_FILE: /app/logs/aliyun-dns-mcp.log
+      PROMETHEUS_PORT: "9464"
+    volumes:
+      - ./logs/aliyun-dns-mcp:/app/logs
     networks: [mcp-net]
     depends_on: [redis]
     restart: unless-stopped

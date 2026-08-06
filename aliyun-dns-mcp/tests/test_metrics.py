@@ -106,8 +106,9 @@ async def test_aliyun_call_records_dependency_metrics(monkeypatch):
     monkeypatch.setattr(telemetry, "DEPENDENCY_ERRORS_TOTAL", fake)
 
     client = AlidnsClient({"access_key_id": "ak", "access_key_secret": "sk"})
-    # 替换 _sdk 为 stub，避免真实 SDK 依赖（_make_sdk 独立方法即为此设计）
-    client._sdk = SimpleNamespace(describe_domains_with_options=lambda req: None)
+    # 替换 _sdk 为 stub，避免真实 SDK 依赖（_make_sdk 独立方法即为此设计）；
+    # stub 签名 (req, runtime) 与真实 SDK with_options 同构
+    client._sdk = SimpleNamespace(describe_domains_with_options=lambda req, runtime: None)
 
     resp = await client._call("describe_domains_with_options", object(), "aliyun_client.test")
     assert resp is None
@@ -117,7 +118,7 @@ async def test_aliyun_call_records_dependency_metrics(monkeypatch):
     class Boom(Exception):
         pass
 
-    def fail(_req):
+    def fail(_req, _runtime):
         raise Boom("boom")
 
     client._sdk = SimpleNamespace(fail_op=fail)

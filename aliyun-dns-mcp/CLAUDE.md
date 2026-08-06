@@ -126,6 +126,7 @@ Dockerfile 用 `uv sync --frozen --no-dev`（lock 决定依赖）。
 - **pubsub 连接死后不自动重连**（account_store.py）：except 分支必须 `aclose()` 旧的 → 重新 `pubsub()` → 重新 subscribe，否则热更新永久失效只能重启进程
 - **httpx logger 提 WARNING**（logging_config.py）：阿里云 SDK RPC 请求 URL query 含 AccessKeyId，httpx 默认 INFO 打印完整 URL 会泄漏凭证。`tests/test_logging.py` 是回归防线。这行是必守项
 - **SDK 同步走 `asyncio.to_thread`**（aliyun_client.py）：SDK 是同步 API，直接调用会阻塞 event loop
+- **`with_options` 第二个参数 runtime 必传**（aliyun_client.py）：真实 SDK 方法签名 `(request, runtime)`，缺它直接 TypeError（端到端验证实测，单测 fake 只签 request 掩盖了它）——`_call` 统一注入 `AlidnsClient.__init__` 构造的 `RuntimeOptions()`（`darabonba.runtime`），fake 签名必须保持同构
 - **pubsub listener 与 server 同 event loop**（server.py `_run`）：跨 loop 用 redis 连接直接 RuntimeError（serpapi 教训）
 - **FastMCP v4 拒绝 `*args/**kwargs` 工具包装**：register() 显式具名包装（tools/__init__.py）
 - **stateless 模式 lifespan 不可靠**：进程级模块单例 init（server.py `_init_runtime`）

@@ -10,6 +10,8 @@ ADMIN_PASS="${ADMIN_PASS:-${ADMIN_INIT_PASSWORD:-admin123}}"
 ZABBIX_MCP_URL="${ZABBIX_MCP_URL:-http://zabbix-mcp:9053/mcp}"
 # 搜索 MCP:name:port(容器内端口),key 从 Redis 读,无 env
 SEARCH_MCPS="tavily-mcp:9050 brave-mcp:9051 serpapi-mcp:9052"
+# 阿里云 DNS MCP:账户 AccessKey 无 env,由 admin UI「阿里云 DNS」页写入 Redis
+ALIYUN_MCP_URL="${ALIYUN_MCP_URL:-http://aliyun-dns-mcp:9054/mcp}"
 TOKEN_NAME="${TOKEN_NAME:-gateway-full}"
 
 echo "=== 登录 admin ==="
@@ -53,6 +55,20 @@ for srv in $SEARCH_MCPS; do
   fi
 done
 
+echo "=== 注册 aliyun-dns-mcp(若不存在)==="
+# 账户级权限在 admin UI「阿里云 DNS」页配置;此处只注册 server + 纳入 token 权限
+EXISTING=$(curl -s -m5 "$ADMIN_HOST/api/servers" -H "Authorization: Bearer $TOK" \
+  | python3 -c "import sys,json; print(any(s['name']=='aliyun-dns-mcp' for s in json.load(sys.stdin)))" 2>/dev/null || echo "False")
+if [ "$EXISTING" = "True" ]; then
+  echo "  aliyun-dns-mcp 已注册,跳过"
+else
+  curl -s -m10 -X POST "$ADMIN_HOST/api/servers" \
+    -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+    -d "{\"name\":\"aliyun-dns-mcp\",\"url\":\"$ALIYUN_MCP_URL\",\"description\":\"Aliyun DNS multi-account record management\"}" \
+    > /dev/null
+  echo "  已注册 aliyun-dns-mcp -> $ALIYUN_MCP_URL"
+fi
+
 echo "=== 刷新工具列表 ==="
 curl -s -m15 -X POST "$ADMIN_HOST/api/servers/zabbix-mcp/refresh-tools" \
   -H "Authorization: Bearer $TOK" \
@@ -63,6 +79,9 @@ for srv in $SEARCH_MCPS; do
     -H "Authorization: Bearer $TOK" \
     | python3 -c "import sys,json; d=json.load(sys.stdin); print(\"  $name tools: %d 个\" % len(d.get(\"tools\",[])))"
 done
+curl -s -m15 -X POST "$ADMIN_HOST/api/servers/aliyun-dns-mcp/refresh-tools" \
+  -H "Authorization: Bearer $TOK" \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  aliyun-dns-mcp tools: %d 个" % len(d.get("tools",[])))'
 
 echo "=== 创建 API token(read+write)==="
 # 幂等:列出已有 token,同名跳过
@@ -71,12 +90,17 @@ EXISTING_TOK=$(curl -s -m5 "$ADMIN_HOST/api/tokens" -H "Authorization: Bearer $T
 if [ "$EXISTING_TOK" = "True" ]; then
   echo "  token '$TOKEN_NAME' 已存在(明文无法再取,如需新明文请删除后重建),跳过"
 else
-  # 权限覆盖 4 个已注册 server;tokens API 校验引用的 server 必须已注册,故在注册之后创建
+  # 权限覆盖全部已注册 server;tokens API 校验引用的 server 必须已注册,故在注册之后创建
   curl -s -m10 -X POST "$ADMIN_HOST/api/tokens" \
     -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$TOKEN_NAME\",\"permissions\":{\"zabbix-mcp\":{\"read\":true,\"write\":true},\"tavily-mcp\":{\"read\":true,\"write\":true},\"brave-mcp\":{\"read\":true,\"write\":true},\"serpapi-mcp\":{\"read\":true,\"write\":true}}}" \
+    -d "{\"name\":\"$TOKEN_NAME\",\"permissions\":{\"zabbix-mcp\":{\"read\":true,\"write\":true},\"tavily-mcp\":{\"read\":true,\"write\":true},\"brave-mcp\":{\"read\":true,\"write\":true},\"serpapi-mcp\":{\"read\":true,\"write\":true},\"aliyun-dns-mcp\":{\"read\":true,\"write\":true}}}" \
     | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  明文 token(只显示一次): %s" % d.get("token","?"))'
 fi
+
+echo ""
+echo "=== 后续(aliyun-dns-mcp)==="
+echo "  1. admin UI「阿里云 DNS」页:添加账户(填写 AccessKey,自动探活)"
+echo "  2. Token 列表 → 授权矩阵:为 token 配账户级 read/write(账户级权限的权威)"
 
 echo ""
 echo "=== MCP client 连接配置 ==="

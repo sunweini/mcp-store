@@ -81,6 +81,8 @@ MCP Client -> gateway-proxy:8082 -> [zabbix-mcp:9053, tavily-mcp:9050, ...]
    - 勾选 read/write 权限
    - Token 明文只显示一次（存哈希）
 
+   > aliyun-dns-mcp 注册后需在「阿里云 DNS」页配账户、在 Token 列表配账户授权矩阵（账户级 read/write，MCP 为权威）；凭证写入 Redis，不进 env/compose
+
 6. **MCP Client 连接配置**
    ```json
    {
@@ -115,7 +117,7 @@ MCP Client -> gateway-proxy:8082 -> [zabbix-mcp:9053, tavily-mcp:9050, ...]
 | 9051 | brave-mcp | 搜索源（2 tools） |
 | 9052 | serpapi-mcp | 搜索源（5 engines） |
 | 9053 | zabbix-mcp | 告警巡检（8 tools） |
-| 9054 | aliyun-dns-mcp | 阿里云 DNS 解析管理（6 tools，规划） |
+| 9054 | aliyun-dns-mcp | 阿里云 DNS 解析管理（6 tools） |
 | 6379 | redis | 配置/状态/失败审计（容器内，不映射宿主） |
 | 3306 | mysql | 调用审计 calls 表（容器内，不映射宿主） |
 
@@ -131,6 +133,7 @@ MCP Client -> gateway-proxy:8082 -> [zabbix-mcp:9053, tavily-mcp:9050, ...]
 | `tavily-mcp/` | Tavily MCP | Tavily 搜索（search/extract/crawl/map/research 5 tools） | ✅ 开发完成 |
 | `brave-mcp/` | Brave MCP | Brave 搜索（web/local 2 tools） | ✅ 开发完成 |
 | `serpapi-mcp/` | SerpAPI MCP | SerpAPI 搜索（google/bing/baidu/duckduckgo/ebay 5 engines） | ✅ 开发完成 |
+| `aliyun-dns-mcp/` | Aliyun DNS MCP | 阿里云 DNS 多账户解析管理（6 tools，账户级读写权限） | ✅ 开发完成 |
 
 ## 知识库（开发必读）
 

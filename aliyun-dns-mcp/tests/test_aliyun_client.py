@@ -12,27 +12,37 @@ class FakeSDKResponse:
 
 
 class FakeSDKClient:
-    """记录调用、按脚本返回/抛错，模拟 alibabacloud 同步 client。"""
+    """记录调用、按脚本返回/抛错，模拟 alibabacloud 同步 client。
+
+    真实 SDK 的 with_options(request, runtime) 第二个参数必传（缺它
+    TypeError，端到端验证实测）——fake 签名保持同构，防回归。
+    """
     def __init__(self, script=None):
         self.calls = []
         self.script = script or {}
 
-    def describe_domains_with_options(self, request):
+    def describe_domains_with_options(self, request, runtime):
         self.calls.append(("describe_domains", request))
         if "domains_error" in self.script:
             raise self.script["domains_error"]
         domain = type("D", (), {"domain_name": "example.com", "dns_servers": ["ns1"], "record_count": 2})()
         return FakeSDKResponse(type("B", (), {"domains": type("L", (), {"domain": [domain]})})())
 
-    def describe_domain_records_with_options(self, request):
+    def describe_domain_records_with_options(self, request, runtime):
         self.calls.append(("describe_domain_records", request))
         rec = type("R", (), {"record_id": "r1", "rr": "@", "type": "A", "value": "1.2.3.4",
                              "ttl": 600, "priority": None, "status": "ENABLE"})()
         return FakeSDKResponse(type("B", (), {"domain_records": type("L", (), {"record": [rec]})})())
 
-    def add_domain_record_with_options(self, request):
+    def add_domain_record_with_options(self, request, runtime):
         self.calls.append(("add_domain_record", request))
         return FakeSDKResponse(type("B", (), {"record_id": "new-1"})())
+
+    def update_domain_record_with_options(self, request, runtime):
+        self.calls.append(("update_domain_record", request))
+
+    def delete_domain_record_with_options(self, request, runtime):
+        self.calls.append(("delete_domain_record", request))
 
 
 class FakeCredentialsStore:
@@ -84,6 +94,19 @@ async def test_aliyun_error_wrapped(monkeypatch):
         await client.describe_domains()
     assert e.value.error_type == "throttled"
     assert e.value.request_id == "req-1"
+
+
+@pytest.mark.asyncio
+async def test_with_options_gets_runtime(monkeypatch):
+    """回归：with_options 第二个参数 runtime 必传（端到端验证实测 TypeError），
+    公共入口 _call 统一注入，fake 签名同构防回归。"""
+    sdk = FakeSDKClient()
+    monkeypatch.setattr("aliyun_client.AlidnsClient._make_sdk", lambda self: sdk)
+    client = AlidnsClient({"access_key_id": "a", "access_key_secret": "s", "region": "cn-hangzhou", "enabled": True})
+    await client.delete_domain_record("r-1")
+    # fake 记录 (name, request)；runtime 参数存在性由 fake 签名本身保证（缺它即 TypeError）
+    assert sdk.calls[0][0] == "delete_domain_record"
+    assert sdk.calls[0][1].record_id == "r-1"
 
 
 def test_client_factory_caches_and_rebuilds():
