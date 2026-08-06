@@ -190,10 +190,28 @@ async def delete_account(account_id: str, _: str = Depends(require_admin)):
     if not removed:
         raise HTTPException(status_code=404, detail="account not found")
     await r.srem(ACCOUNTS_INDEX, account_id)
-    # 清理授权引用：删除账户时从所有 token 的授权映射移除该账户
-    # （防僵尸授权——MCP 侧虽有 account_not_found 兜底，数据应保持干净）
+    # 清理授权引用：删除账户时从所有 token 的授权映射移除该账户，并重算
+    # 各 token 的 server 级 union（防僵尸授权 + 权限残留——MCP 侧虽有
+    # account_not_found 兜底，数据应保持干净，spec §6.2）
+    from api.aliyun_perms import _recompute_union
     async for key in r.scan_iter(match="aliyndns:token_accounts:*"):
+        token_id = key.rsplit(":", 1)[-1]
         await r.hdel(key, account_id)
+        # 剩余授权非空：重算 union；空 hash：删 key + union 归零（唯一授权
+        # 被删时 server 级权限必须同步降为 read=false/write=false）
+        remaining = await r.hgetall(key)
+        if remaining:
+            # 脏 payload（非 JSON）跳过，不影响其余账户的 union 计算
+            perms = {}
+            for acct, payload in remaining.items():
+                try:
+                    perms[acct] = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+            await _recompute_union(r, token_id, perms)
+        else:
+            await r.delete(key)
+            await _recompute_union(r, token_id, {})
     await _publish("delete", account_id)
     logger.info("aliyun_account_deleted", account_id=account_id, service="gateway-admin")
     return None

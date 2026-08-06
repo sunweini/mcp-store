@@ -103,3 +103,62 @@ async def test_delete_account_cleans_token_perms(no_probe, client, fake_redis, a
     remaining = await fake_redis.hgetall("aliyndns:token_accounts:tokid_1")
     assert "acct1" not in remaining
     assert "acct2" in remaining
+
+
+async def test_delete_account_resyncs_token_union(no_probe, client, fake_redis, auth_headers):
+    """删除唯一授权账户后，gateway token 的 server 级 union 同步归零（防权限残留）。"""
+    # 造 server + 账户 + token（aliyun-dns-mcp read+write）+ 授权 acct1(write)
+    client.post("/api/servers", json={"name": "aliyun-dns-mcp",
+                                      "url": "http://aliyun-dns-mcp:9054/mcp",
+                                      "description": "dns"}, headers=auth_headers)
+    client.post("/api/aliyun-accounts", json={
+        "account_id": "acct1", "access_key_id": "a", "access_key_secret": "s",
+        "probe": False}, headers=auth_headers)
+    tok = client.post("/api/tokens", json={
+        "name": "ro", "permissions": {"aliyun-dns-mcp": {"read": True, "write": True}}},
+        headers=auth_headers).json()["id"]
+    client.put(f"/api/aliyun-perms/{tok}", json={
+        "permissions": {"acct1": {"read": False, "write": True}}}, headers=auth_headers)
+    token_hash = await fake_redis.get(f"token_id:{tok}")
+    perms = json.loads((await fake_redis.hgetall(f"tokens:{token_hash}"))["permissions"])
+    assert perms["aliyun-dns-mcp"] == {"read": True, "write": True}  # 前置：union 已开
+
+    resp = client.delete("/api/aliyun-accounts/acct1", headers=auth_headers)
+    assert resp.status_code == 204
+    # 唯一授权被清空 → 授权映射 key 已删
+    assert not await fake_redis.exists(f"aliyndns:token_accounts:{tok}")
+    # server 级 union 归零，与 GET perms 返回 {} 一致
+    perms = json.loads((await fake_redis.hgetall(f"tokens:{token_hash}"))["permissions"])
+    assert perms["aliyun-dns-mcp"] == {"read": False, "write": False}
+
+
+async def test_delete_account_union_keeps_other_accounts(no_probe, client, fake_redis, auth_headers):
+    """删除多账户授权中的一个账户：保留其余授权并按其重算 union。"""
+    client.post("/api/servers", json={"name": "aliyun-dns-mcp",
+                                      "url": "http://aliyun-dns-mcp:9054/mcp",
+                                      "description": "dns"}, headers=auth_headers)
+    for aid in ("acct1", "acct2"):
+        client.post("/api/aliyun-accounts", json={
+            "account_id": aid, "access_key_id": "a", "access_key_secret": "s",
+            "probe": False}, headers=auth_headers)
+    tok = client.post("/api/tokens", json={
+        "name": "ro", "permissions": {"aliyun-dns-mcp": {"read": True, "write": True}}},
+        headers=auth_headers).json()["id"]
+    client.put(f"/api/aliyun-perms/{tok}", json={
+        "permissions": {
+            "acct1": {"read": False, "write": True},
+            "acct2": {"read": True, "write": False},
+        }}, headers=auth_headers)
+    token_hash = await fake_redis.get(f"token_id:{tok}")
+    perms = json.loads((await fake_redis.hgetall(f"tokens:{token_hash}"))["permissions"])
+    assert perms["aliyun-dns-mcp"] == {"read": True, "write": True}
+
+    resp = client.delete("/api/aliyun-accounts/acct1", headers=auth_headers)
+    assert resp.status_code == 204
+    # acct2 授权保留，acct1 引用已移除
+    remaining = await fake_redis.hgetall(f"aliyndns:token_accounts:{tok}")
+    assert "acct1" not in remaining
+    assert json.loads(remaining["acct2"]) == {"read": True, "write": False}
+    # union 按剩余 acct2 重算：write 降为 false
+    perms = json.loads((await fake_redis.hgetall(f"tokens:{token_hash}"))["permissions"])
+    assert perms["aliyun-dns-mcp"] == {"read": True, "write": False}

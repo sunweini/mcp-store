@@ -41,6 +41,27 @@ async def _publish(token_id: str) -> None:
                        error=str(e), service="gateway-admin")
 
 
+async def _recompute_union(r, token_id: str, remaining: dict[str, dict]) -> None:
+    """按剩余账户授权重算 gateway token 的 server 级 read/write union。
+
+    aliyndns:token_accounts:{token_id}（账户级权限权威）与 gateway token
+    的 tokens:{hash}.permissions.aliyun-dns-mcp（工具可见性粗闸）双写必须
+    一致：授权变更（put_perms）与账户删除（delete_account 清理引用）都经
+    此收敛，否则管理界面 server 级权限与授权矩阵互相矛盾。
+    token 已不存在（token_id 无映射）则跳过——delete_token 已整体清理
+    授权映射，无需重算。
+    """
+    token_hash = await r.get(f"token_id:{token_id}")
+    if not token_hash:
+        return
+    perms = json.loads((await r.hgetall(f"tokens:{token_hash}")).get("permissions", "{}"))
+    perms[SERVER_NAME] = {
+        "read": any(v.get("read") for v in remaining.values()),
+        "write": any(v.get("write") for v in remaining.values()),
+    }
+    await r.hset(f"tokens:{token_hash}", "permissions", json.dumps(perms))
+
+
 @router.get("/{token_id}")
 async def get_perms(token_id: str, _: str = Depends(require_admin)):
     r = get_redis()
@@ -74,13 +95,7 @@ async def put_perms(token_id: str, req: PermsPut, _: str = Depends(require_admin
     else:
         await r.delete(f"aliyndns:token_accounts:{token_id}")
     # union → gateway token 的 server 级 read/write（工具可见性）
-    token_data = await r.hgetall(f"tokens:{token_hash}")
-    perms = json.loads(token_data.get("permissions", "{}"))
-    perms[SERVER_NAME] = {
-        "read": any(v["read"] for v in normalized.values()),
-        "write": any(v["write"] for v in normalized.values()),
-    }
-    await r.hset(f"tokens:{token_hash}", "permissions", json.dumps(perms))
+    await _recompute_union(r, token_id, normalized)
     await _publish(token_id)
     logger.info("aliyun_perms_updated", token_id=token_id, accounts=len(normalized),
                 service="gateway-admin")
