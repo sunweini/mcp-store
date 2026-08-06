@@ -22,16 +22,15 @@ async def test_list_tools(client):
     tools = await client.list_tools()
     assert len(tools) >= 1
     names = {t.name for t in tools}
-    assert "list_items" in names
+    # 模板示例 tool 已删（Task 7），6 个真实工具由 register_tools 注入
+    assert names == {"list_accounts", "list_domains", "list_records",
+                     "add_record", "update_record", "delete_record"}
 
 
 @pytest.mark.asyncio
-async def test_list_items_tool(client):
-    result = await client.call_tool("list_items", {"query": "demo"})
-    assert "item" in str(result)
-
-
-@pytest.mark.asyncio
-async def test_version_resource(client):
-    resources = await client.list_resources()
-    assert len(resources) >= 1
+async def test_tools_annotations(client):
+    """读写标注回归：写工具 destructive、读工具 read-only。"""
+    tools = {t.name: t for t in await client.list_tools()}
+    assert tools["add_record"].annotations.destructive_hint is True
+    assert tools["list_domains"].annotations.read_only_hint is True
+    assert "⚠️ 写操作" in (tools["add_record"].description or "")

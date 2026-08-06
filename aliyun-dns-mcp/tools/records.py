@@ -15,7 +15,8 @@ async def list_records(account_id: str, domain_name: str, *, ctx: ToolContext | 
     返回 [{record_id, rr, type, value, ttl, priority, status}]，取前 100 条。
     """
     if ctx is None:
-        return {"status": "error", "error_type": "internal", "message": "context not initialized"}
+        return {"status": "error", "error_type": "internal", "message": "context not initialized",
+                "request_id": None}
     await ctx.checker.require(account_id, "read")
     try:
         client = ctx.clients.get(account_id)
@@ -37,7 +38,8 @@ async def add_record(account_id: str, domain_name: str, rr: str, type: str, valu
     priority 仅 MX/SRV 需要。
     """
     if ctx is None:
-        return {"status": "error", "error_type": "internal", "message": "context not initialized"}
+        return {"status": "error", "error_type": "internal", "message": "context not initialized",
+                "request_id": None}
     await ctx.checker.require(account_id, "write")
     try:
         client = ctx.clients.get(account_id)
@@ -63,7 +65,8 @@ async def update_record(account_id: str, record_id: str,
     至少传一个更新字段；未传的字段保持不变。
     """
     if ctx is None:
-        return {"status": "error", "error_type": "internal", "message": "context not initialized"}
+        return {"status": "error", "error_type": "internal", "message": "context not initialized",
+                "request_id": None}
     if all(v is None for v in (rr, type, value, ttl, priority)):
         return {"status": "error", "error_type": "invalid_params",
                 "message": "至少提供一个更新字段 (rr/type/value/ttl/priority)"}
@@ -85,7 +88,8 @@ async def delete_record(account_id: str, record_id: str, *, ctx: ToolContext | N
     ⚠️ 写操作 — 删除不可撤销，执行前必须向用户确认。
     """
     if ctx is None:
-        return {"status": "error", "error_type": "internal", "message": "context not initialized"}
+        return {"status": "error", "error_type": "internal", "message": "context not initialized",
+                "request_id": None}
     await ctx.checker.require(account_id, "write")
     try:
         client = ctx.clients.get(account_id)

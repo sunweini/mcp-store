@@ -15,7 +15,8 @@ async def list_domains(account_id: str, *, ctx: ToolContext | None = None) -> di
     返回 [{domain_name, dns_servers, record_count}]，取前 100 条。
     """
     if ctx is None:
-        return {"status": "error", "error_type": "internal", "message": "context not initialized"}
+        return {"status": "error", "error_type": "internal", "message": "context not initialized",
+                "request_id": None}
     await ctx.checker.require(account_id, "read")
     try:
         client = ctx.clients.get(account_id)

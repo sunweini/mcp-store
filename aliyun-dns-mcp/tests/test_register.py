@@ -15,6 +15,6 @@ async def test_register_tools_six_tools():
     tools = {t.name: t for t in await mcp.list_tools()}
     assert set(tools) == {"list_accounts", "list_domains", "list_records",
                           "add_record", "update_record", "delete_record"}
-    assert tools["add_record"].annotations.destructiveHint is True
-    assert tools["list_domains"].annotations.readOnlyHint is True
+    assert tools["add_record"].annotations.destructive_hint is True
+    assert tools["list_domains"].annotations.read_only_hint is True
     assert "⚠️ 写操作" in (tools["add_record"].description or "")

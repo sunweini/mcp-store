@@ -16,9 +16,6 @@ logger = structlog.get_logger()
 ACCOUNTS_INDEX = "aliyndns:accounts:index"
 CHANGE_CHANNEL = "aliyndns:changed"
 
-# 凭证字段白名单——load 时只取这些键，防脏数据注入意外字段
-_CRED_FIELDS = ("access_key_id", "access_key_secret", "description", "region", "enabled")
-
 
 class AccountStore:
     def __init__(self, redis):

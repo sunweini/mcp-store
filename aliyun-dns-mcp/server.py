@@ -1,75 +1,101 @@
-"""{{MCP_NAME}} — MCP Server
+"""Aliyun DNS MCP Server — entry point.
 
-Protocol: MCP 2026-07-28 (stateless HTTP)
-Framework: FastMCP 4.0.0b1
-Gateway-ready: annotations 读写分离 / tool 描述 / MCP ping 探活 / structlog + OTel
+提供阿里云 DNS 解析管理：多账户托管、域名/解析查询、增删改解析记录。
+账户级 read/write 权限由本 server 校验（MCP 是权威）：gateway 的 proxy
+transport 自动转发 Authorization 头，本服务验证 token 并查账户级权限。
+
+Observability: structlog + OTel（日志注入 trace_id/span_id）+ Prometheus。
+Env: REDIS_URL（必填）、MCP_HOST/MCP_PORT、LOG_FORMAT、PROMETHEUS_PORT、
+OTEL_EXPORTER_OTLP_ENDPOINT、OTEL_SERVICE_NAME。
 """
+import asyncio
 import os
 
 import structlog
 from fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+import redis.asyncio as redis
 
-# ── Configuration ────────────────────────────────────────────────
-# NOTE: MCP_PORT 必须用根 CLAUDE.md 端口表登记的最小未用端口（9050-9500），
-# 不要默认 8000——容器内端口规范统一，登记后再开发。
-HOST = os.environ.get("MCP_HOST", "0.0.0.0")
-PORT = int(os.environ.get("MCP_PORT", "9054"))
+from account_store import AccountStore
+from auth import PermissionChecker
+from aliyun_client import ClientFactory
+from tools import ToolContext
+
+MCP_HOST = os.environ.get("MCP_HOST", "0.0.0.0")
+MCP_PORT = int(os.environ.get("MCP_PORT", "9054"))
+REDIS_URL = os.environ.get("REDIS_URL", "")
+LOG_FORMAT = os.environ.get("LOG_FORMAT", "console")
+
+
+def _configure_logging() -> None:
+    from logging_config import configure_logging
+    configure_logging([
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        structlog.processors.JSONRenderer() if LOG_FORMAT == "json"
+        else structlog.dev.ConsoleRenderer(),
+    ])
+
 
 logger = structlog.get_logger()
 
-# NOTE: instructions 让 client/AI 理解本 MCP 能力，务必写清楚。
+# 进程级单例（stateless 模式 lifespan 不可靠，模块级 init）。
+_store = None
+_checker = None
+_clients = None
+
+
+def _init_runtime() -> None:
+    """初始化 AccountStore/PermissionChecker/ClientFactory。启动时调用一次。"""
+    global _store, _checker, _clients
+    if not REDIS_URL:
+        raise RuntimeError("REDIS_URL environment variable is required")
+    client = redis.from_url(REDIS_URL, decode_responses=True)
+    _store = AccountStore(client)
+    _checker = PermissionChecker(_store, client)
+    _clients = ClientFactory(_store)
+
+
+def _get_ctx() -> ToolContext:
+    if _checker is None or _clients is None:
+        raise RuntimeError("runtime not initialized — call _init_runtime()")
+    return ToolContext(checker=_checker, clients=_clients)
+
+
+_configure_logging()
+
+try:
+    from telemetry import init_telemetry
+    init_telemetry("aliyun-dns-mcp")
+except Exception as exc:
+    # 可观测性降级不应杀服务
+    logger.warning("telemetry_init_failed", service="aliyun-dns-mcp", error=str(exc))
+
 mcp = FastMCP(
-    "{{MCP_NAME}}",
-    instructions="{{一句话描述本 MCP 的能力与使用方式}}",
+    "Aliyun DNS MCP",
+    instructions=(
+        "阿里云 DNS 解析管理：list_accounts 查看可访问账户，"
+        "list_domains/list_records 查询，add_record/update_record/delete_record "
+        "增删改解析记录。所有写操作需要用户确认，且受账户级读写权限控制。"
+    ),
 )
 
-
-# ── 读操作 Tool ──────────────────────────────────────────────────
-# NOTE: readOnlyHint=True → Gateway 判定为 read，token 有 read 权限即可调用。
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-def list_items(query: str = "", limit: int = 50) -> list[dict]:
-    """查询条目列表（示例读操作，替换为真实逻辑）。
-
-    返回匹配 query 的条目，按时间降序。
-    """
-    logger.info("list_items", service="{{mcp-name}}", query=query, limit=limit)
-    return [{"id": i, "name": f"item-{i}"} for i in range(limit)]
-
-
-# ── 写操作 Tool ──────────────────────────────────────────────────
-# NOTE: destructiveHint=True → Gateway 判定为 write，需 token 有 write 权限。
-# docstring 含「⚠️ 写操作」标记，AI 读到后走用户确认流程。
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
-def create_item(name: str) -> dict:
-    """创建条目（示例写操作，替换为真实逻辑）。
-
-    ⚠️ 写操作 — 执行前必须向用户确认参数后再调用。
-    """
-    logger.info("create_item", service="{{mcp-name}}", name=name)
-    return {"id": "new-id", "name": name, "created": True}
-
-
-# ── Resources ────────────────────────────────────────────────────
-@mcp.resource("info://version")
-def get_version() -> str:
-    """Return server version."""
-    return "0.1.0"
-
-
-# ── Prompts ──────────────────────────────────────────────────────
-@mcp.prompt()
-def help_prompt() -> str:
-    """Show available operations."""
-    return "Available tools: list_items (read), create_item (write)."
+from tools import register_tools
+register_tools(mcp, _get_ctx)
 
 
 if __name__ == "__main__":
-    # NOTE: stateless_http=True 是接入 Gateway 的硬性要求。
-    # MCP 标准 ping 由 FastMCP 原生提供，Gateway 据此探活，无需额外实现。
-    mcp.run(
-        transport="streamable-http",
-        stateless_http=True,
-        host=HOST,
-        port=PORT,
-    )
+    _init_runtime()
+
+    async def _run() -> None:
+        # listener 必须与 server 同 event loop（serpapi 教训：跨 loop 用
+        # redis 连接直接 RuntimeError）
+        await _store.start()
+        await mcp.run_async(
+            transport="streamable-http",
+            stateless_http=True,
+            host=MCP_HOST,
+            port=MCP_PORT,
+        )
+
+    asyncio.run(_run())

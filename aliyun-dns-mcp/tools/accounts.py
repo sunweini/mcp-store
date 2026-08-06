@@ -15,7 +15,8 @@ async def list_accounts(*, ctx: ToolContext | None = None) -> dict:
     不暴露 AccessKey 等凭证信息。
     """
     if ctx is None:
-        return {"status": "error", "error_type": "internal", "message": "context not initialized"}
+        return {"status": "error", "error_type": "internal", "message": "context not initialized",
+                "request_id": None}
     accounts = await ctx.checker.allowed_accounts()
     return {"status": "ok", "data": accounts, "count": len(accounts)}
 
