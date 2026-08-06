@@ -116,6 +116,22 @@ def test_safe_probe_error_strips_query():
     assert len(mod._safe_probe_error("", long_msg)) == 200
 
 
+def test_probe_real_sdk_with_fake_credentials():
+    """真实 SDK 探活路径：假凭证应返回阿里云凭证错误，而非 RuntimeOptions 类型错误。
+
+    回归防线：_probe 曾传 {} 给 describe_domains_with_options 触发
+    "'dict' object has no attribute 'key'"（生产实测）。传 RuntimeOptions()
+    后假凭证应走到阿里云 API 层（InvalidAccessKeyId），错误码而非 AttributeError。
+    """
+    import asyncio
+    import api.aliyun_accounts as mod
+    result = asyncio.run(mod._probe("LTAI-probe-test", "invalid-secret", "cn-hangzhou"))
+    assert result["ok"] is False
+    # 关键断言：错误是阿里云凭证类错误，不是 SDK 内部类型错误
+    assert "attribute 'key'" not in result["error"].lower()
+    assert "dict" not in result["error"].lower()
+
+
 def test_create_account_duplicate_rejected(no_probe, client, fake_redis, auth_headers):
     client.post("/api/aliyun-accounts", json={
         "account_id": "acct1", "access_key_id": "a", "access_key_secret": "s"}, headers=auth_headers)

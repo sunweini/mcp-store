@@ -87,13 +87,17 @@ async def _probe(access_key_id: str, access_key_secret: str, region: str) -> dic
         from alibabacloud_alidns20150109 import models as alidns_models
 
         def run():
+            from darabonba.runtime import RuntimeOptions
             c = alidns_client.Client(open_api_models.Config(
                 access_key_id=access_key_id,
                 access_key_secret=access_key_secret,
                 endpoint="alidns.cn-hangzhou.aliyuncs.com",
             ))
+            # NOTE: 第二参数必须是 RuntimeOptions 实例——传 dict 会触发
+            # SDK 内部 .key 属性访问报 "'dict' object has no attribute 'key'"
+            # （生产实测，aliyun-dns-mcp 的 _call 同坑已在 Task 10 修）
             c.describe_domains_with_options(
-                alidns_models.DescribeDomainsRequest(page_size=1, page_number=1), {})
+                alidns_models.DescribeDomainsRequest(page_size=1, page_number=1), RuntimeOptions())
 
         await asyncio.to_thread(run)
         return {"ok": True}
