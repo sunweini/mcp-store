@@ -2510,7 +2510,8 @@ onMounted(load)
       </div>
       <div v-else>
         <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
-          勾选该 token 可访问的账户与读写权限（可写自动含可读）。保存时自动同步 gateway 的 server 级读写权限。
+          勾选账户授予该 token 访问权（可写自动含可读）；取消某账户全部勾选 =
+          解除该账户的绑定。保存时自动同步 gateway 的 server 级读写权限。
         </p>
         <table class="tbl">
           <thead><tr><th>账户</th><th style="width:120px;text-align:center">Read</th><th style="width:120px;text-align:center">Write</th></tr></thead>
