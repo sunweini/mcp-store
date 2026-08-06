@@ -13,6 +13,7 @@ import os
 
 import structlog
 from fastmcp import FastMCP
+from opentelemetry import trace
 import redis.asyncio as redis
 
 from account_store import AccountStore
@@ -27,9 +28,24 @@ LOG_FORMAT = os.environ.get("LOG_FORMAT", "console")
 
 
 def _configure_logging() -> None:
+    """Configure structlog with OTel trace context injection.
+
+    OBS-CORE-002: 每条日志携带 trace_id/span_id（全链路关联）。
+    """
+
+    def add_trace_context(logger, method_name, event_dict):
+        """从当前 OTel span 提取 trace_id/span_id 注入日志。"""
+        span = trace.get_current_span()
+        sc = span.get_span_context()
+        if sc and sc.is_valid:
+            event_dict["trace_id"] = format(sc.trace_id, "032x")
+            event_dict["span_id"] = format(sc.span_id, "016x")
+        return event_dict
+
     from logging_config import configure_logging
     configure_logging([
         structlog.contextvars.merge_contextvars,
+        add_trace_context,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.JSONRenderer() if LOG_FORMAT == "json"

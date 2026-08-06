@@ -12,13 +12,14 @@ from mcp.types import ToolAnnotations
 
 from dataclasses import dataclass
 
-logger = structlog.get_logger()
+# CRITICAL: 运行时模块访问（`import telemetry` 而非 `from telemetry import X`）。
+# 若用 from-import，模块加载瞬间（server.py 顶部 import tools 时，telemetry 尚
+# 未 init）会把指标绑定为 None，init_telemetry() 随后只更新 telemetry 模块自身
+# 的全局——_metrics_wrapper 的 guard 将永远跳过，aliyndns_requests_total 等
+# 4 个指标静默失效（审查实测确认）。运行时取值免疫任何 import 顺序。
+import telemetry
 
-try:
-    from telemetry import REQUESTS_TOTAL, REQUEST_DURATION, ERRORS_TOTAL, IN_FLIGHT_REQUESTS
-except ImportError:
-    # telemetry 未就绪（Task 7 前）时指标为 None，record 前 guard
-    REQUESTS_TOTAL = REQUEST_DURATION = ERRORS_TOTAL = IN_FLIGHT_REQUESTS = None
+logger = structlog.get_logger()
 
 
 @dataclass
@@ -30,29 +31,36 @@ class ToolContext:
 
 def _metrics_wrapper(tool_name: str):
     """记录 tool 级 Prometheus 指标（zabbix 模式）。"""
+    # 运行时取值：与 `import telemetry` 配套（见文件头 CRITICAL 注释），
+    # 每调用读取当前 telemetry.REQUESTS_TOTAL 等，init_telemetry 后即生效。
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
-            if REQUESTS_TOTAL:
-                REQUESTS_TOTAL.add(1, attributes={"tool_name": tool_name})
-            if IN_FLIGHT_REQUESTS:
-                IN_FLIGHT_REQUESTS.add(1)
+            requests_total = telemetry.REQUESTS_TOTAL
+            if requests_total:
+                requests_total.add(1, attributes={"tool_name": tool_name})
+            in_flight = telemetry.IN_FLIGHT_REQUESTS
+            if in_flight:
+                in_flight.add(1)
             start = time.monotonic()
             try:
                 result = await func(*args, **kwargs)
-                if isinstance(result, dict) and result.get("status") == "error" and ERRORS_TOTAL:
-                    ERRORS_TOTAL.add(1, attributes={"tool_name": tool_name, "error_type": "tool_error"})
+                errors_total = telemetry.ERRORS_TOTAL
+                if isinstance(result, dict) and result.get("status") == "error" and errors_total:
+                    errors_total.add(1, attributes={"tool_name": tool_name, "error_type": "tool_error"})
                 return result
             except Exception as e:
-                if ERRORS_TOTAL:
-                    ERRORS_TOTAL.add(1, attributes={"tool_name": tool_name, "error_type": type(e).__name__})
+                errors_total = telemetry.ERRORS_TOTAL
+                if errors_total:
+                    errors_total.add(1, attributes={"tool_name": tool_name, "error_type": type(e).__name__})
                 raise
             finally:
                 duration = time.monotonic() - start
-                if REQUEST_DURATION:
-                    REQUEST_DURATION.record(duration, attributes={"tool_name": tool_name})
-                if IN_FLIGHT_REQUESTS:
-                    IN_FLIGHT_REQUESTS.add(-1)
+                request_duration = telemetry.REQUEST_DURATION
+                if request_duration:
+                    request_duration.record(duration, attributes={"tool_name": tool_name})
+                if in_flight:
+                    in_flight.add(-1)
         return wrapper
     return decorator
 

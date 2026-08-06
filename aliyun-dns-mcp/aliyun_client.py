@@ -10,9 +10,14 @@ WARNING（logging_config 处理），日志只记 account_id 不记凭证。
 from __future__ import annotations  # ClientFactory.__init__ 注解引用 AccountStore（仅类型），不引入运行时 import
 
 import asyncio
+import time
 
 import structlog
 from opentelemetry import trace
+
+# CRITICAL: 运行时模块访问（同 tools/__init__.py 的坑）——模块加载时 telemetry
+# 可能尚未 init，from-import 会把指标绑定为 None；运行时取值免疫 import 顺序。
+import telemetry
 
 logger = structlog.get_logger()
 tracer = trace.get_tracer("aliyun-dns-mcp")
@@ -72,15 +77,26 @@ class AlidnsClient:
 
         with tracer.start_as_current_span(span_name) as span:
             span.set_attribute("operation.type", "aliyun_api")
+            start = time.monotonic()
             try:
                 return await asyncio.to_thread(run)
             except Exception as exc:
+                # OBS-MET-001: 依赖指标——失败记 dependency_errors_total
+                dep_errors = telemetry.DEPENDENCY_ERRORS_TOTAL
+                if dep_errors:
+                    dep_errors.add(1, attributes={"dependency": "alidns_api", "error_type": "api_error"})
                 span.record_exception(exc)
                 span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
                 err_type = classify_error(exc)
                 logger.error("aliyun_api_error", service="aliyun-dns-mcp",
                              api=api_name, error_type=err_type, error=str(exc))
                 raise AlidnsError(err_type, str(exc), getattr(exc, "request_id", None)) from exc
+            finally:
+                # 成功/失败都记延迟（histogram 带 status 区分）
+                duration = time.monotonic() - start
+                dep_duration = telemetry.DEPENDENCY_DURATION
+                if dep_duration:
+                    dep_duration.record(duration, attributes={"dependency": "alidns_api", "api": api_name})
 
     @staticmethod
     def _body(resp):

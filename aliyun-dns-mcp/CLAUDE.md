@@ -129,6 +129,7 @@ Dockerfile 用 `uv sync --frozen --no-dev`（lock 决定依赖）。
 - **pubsub listener 与 server 同 event loop**（server.py `_run`）：跨 loop 用 redis 连接直接 RuntimeError（serpapi 教训）
 - **FastMCP v4 拒绝 `*args/**kwargs` 工具包装**：register() 显式具名包装（tools/__init__.py）
 - **stateless 模式 lifespan 不可靠**：进程级模块单例 init（server.py `_init_runtime`）
+- **指标必须运行时取值**（tools/__init__.py 与 aliyun_client.py 头部 CRITICAL 注释）：`from telemetry import X` 在模块加载瞬间（init_telemetry 之前）把指标绑定为 None，之后 init_telemetry 只更新 telemetry 模块自身——4 个 tool 级指标与 2 个 dependency 指标将静默失效。必须 `import telemetry` 后运行时访问 `telemetry.REQUESTS_TOTAL` 等（`tests/test_metrics.py` monkeypatch 回归验证）
 - **ToolAnnotations 字段名**：读取端用 snake_case（`destructive_hint`/`read_only_hint`）——驼峰（`destructiveHint`）是 pydantic alias，读取触发 FastMCPDeprecationWarning（v4.0.0b1 实测）；**写入端**（`ToolAnnotations(destructiveHint=True)`）两种都兼容，保持驼峰与 gateway 读取一致
 - redis-py ≥6 `get_message()` 不传 `ignore_subscribe=True`（参数已改名，必 TypeError 静默失效）——用 `type=="message"` 过滤最稳
 

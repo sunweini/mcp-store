@@ -73,6 +73,8 @@ UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ uv lock
 
 ```dockerfile
 FROM python:3.12-slim
+# healthcheck 用 curl（slim 镜像无 curl，见「compose 示例」）
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
@@ -91,12 +93,14 @@ aliyun-dns-mcp:
   image: <registry>/aliyun-dns-mcp:<version>
   environment:
     REDIS_URL: redis://redis:6379/0
-    MCP_PORT: "9054"            # 容器内固定，不映射宿主
-    PROMETHEUS_PORT: "9464"     # 容器内固定；宿主端错开如 9469
+    MCP_PORT: "9054"            # 容器内固定；如需宿主映射（不建议），改 ports
+    PROMETHEUS_PORT: "9464"     # 容器内固定
     LOG_FORMAT: json
     OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
   networks: [gateway-net]       # 与 gateway-proxy 同网，供其内网访问
   depends_on: [redis]
+  # 如确需宿主访问 metrics，加 ports（错开宿主端口）：
+  # ports: ["9469:9464"]
   healthcheck:
     test: ["CMD", "curl", "-f", "-X", "POST", "http://127.0.0.1:9054/mcp",
            "-H", "MCP-Protocol-Version: 2026-07-28", "-H", "Mcp-Method: tools/list",
@@ -126,7 +130,7 @@ curl -X POST http://<host>:9054/mcp \
 ### 可观测性
 
 - 结构化日志 → stdout（key=value 格式，`LOG_FORMAT=json` 切 JSON 对接 Loki/ELK）
-- Prometheus metrics → 容器内 `:9464/metrics`（宿主映射错开端口）
+- Prometheus metrics → 容器内 `:9464/metrics`（如需宿主访问，ports 错开映射，见 compose 示例）
 - OpenTelemetry traces → `OTEL_EXPORTER_OTLP_ENDPOINT`（未设时 console span）
 
 ## 已知注意事项
