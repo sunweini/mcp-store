@@ -1,0 +1,42 @@
+[tool.uv]
+prerelease = "allow"
+# NOTE: 项目无包目录（server.py 为入口脚本），virtual 模式避免 hatchling 构建报错，
+# 与 tavily-mcp 成功实践一致（lock source = virtual）。后续建 tools/ 若需 editable 安装再改。
+package = false
+
+[project]
+name = "aliyun-dns-mcp"
+version = "0.1.0"
+description = "阿里云 DNS 解析管理 MCP：多账户托管、域名/解析查询、增删改解析，账户级读写权限"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "fastmcp==4.0.0b1",
+    "httpx>=0.27,<1.0",
+    "structlog>=24.0",
+    "redis>=5.0",
+    "opentelemetry-api",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp-proto-http",
+    "opentelemetry-exporter-otlp-proto-grpc",
+    "opentelemetry-exporter-prometheus",
+    "prometheus-client",
+    "alibabacloud-alidns20150109",
+    "alibabacloud-tea-openapi",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "fakeredis>=2.20",
+]
+
+[tool.pytest.ini_options]
+# NOTE: pytest-asyncio 1.x strict 模式下 async fixture 需事件循环工厂，
+# auto 模式与 zabbix-mcp / tavily-mcp 一致（模板缺此配置导致测试直接报错）
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

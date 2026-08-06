@@ -115,6 +115,7 @@ MCP Client -> gateway-proxy:8082 -> [zabbix-mcp:9053, tavily-mcp:9050, ...]
 | 9051 | brave-mcp | 搜索源（2 tools） |
 | 9052 | serpapi-mcp | 搜索源（5 engines） |
 | 9053 | zabbix-mcp | 告警巡检（8 tools） |
+| 9054 | aliyun-dns-mcp | 阿里云 DNS 解析管理（6 tools，规划） |
 | 6379 | redis | 配置/状态/失败审计（容器内，不映射宿主） |
 | 3306 | mysql | 调用审计 calls 表（容器内，不映射宿主） |
 
