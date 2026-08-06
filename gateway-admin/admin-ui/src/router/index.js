@@ -7,6 +7,7 @@ const routes = [
   { path: '/servers', name: 'servers', component: () => import('../views/Servers.vue') },
   { path: '/tokens', name: 'tokens', component: () => import('../views/Tokens.vue') },
   { path: '/api-keys', name: 'api-keys', component: () => import('../views/APIKeys.vue') },
+  { path: '/aliyun-accounts', name: 'aliyun-accounts', component: () => import('../views/AliyunAccounts.vue') },
   { path: '/calls', name: 'calls', component: () => import('../views/Calls.vue') },
 ]
 

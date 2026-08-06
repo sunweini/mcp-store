@@ -49,3 +49,13 @@ export function getCalls(params = {}) {
   if (params.offset) p.set('offset', params.offset)
   return apiFetch(`/api/calls?${p}`)
 }
+
+// ── Aliyun DNS 账户 + 授权矩阵 ─────────────────
+export function getAliyunAccounts()         { return apiFetch('/api/aliyun-accounts') }
+export function createAliyunAccount(data)   { return apiFetch('/api/aliyun-accounts', { method:'POST', body:JSON.stringify(data) }) }
+export function updateAliyunAccount(id, data) { return apiFetch(`/api/aliyun-accounts/${id}`, { method:'PUT', body:JSON.stringify(data) }) }
+export function deleteAliyunAccount(id)     { return apiFetch(`/api/aliyun-accounts/${id}`, { method:'DELETE' }) }
+export function getAliyunPerms(tokenId)     { return apiFetch(`/api/aliyun-perms/${tokenId}`) }
+export function putAliyunPerms(tokenId, permissions) {
+  return apiFetch(`/api/aliyun-perms/${tokenId}`, { method:'PUT', body:JSON.stringify({ permissions }) })
+}

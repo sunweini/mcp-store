@@ -40,6 +40,7 @@
           <td class="mono" style="font-size:11.5px;color:var(--muted)">{{ fmtDate(t.created_at) }}</td>
           <td>
             <div class="row-actions">
+              <button class="mini-btn" @click="openPerms(t)">授权</button>
               <button class="mini-btn danger" @click="doDelete(t)">删除</button>
             </div>
           </td>
@@ -86,12 +87,43 @@
         </button>
       </template>
     </Modal>
+
+    <!-- ═════ ALIYUN ACCOUNT PERMISSION MATRIX MODAL ═════ -->
+    <Modal :show="!!permModal" :title="'账户授权 — ' + (permModal?.token_name || '')" @close="permModal = null">
+      <div v-if="!permAccounts.length" class="muted" style="font-size:12px;padding:8px 0">
+        暂无阿里云账户，请先到「阿里云 DNS」页添加账户
+      </div>
+      <div v-else>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+          勾选账户授予该 token 访问权（可写自动含可读）；取消某账户全部勾选 =
+          解除该账户的绑定。保存时自动同步 gateway 的 server 级读写权限。
+        </p>
+        <table class="tbl">
+          <thead><tr><th>账户</th><th style="width:120px;text-align:center">Read</th><th style="width:120px;text-align:center">Write</th></tr></thead>
+          <tbody>
+            <tr v-for="a in permAccounts" :key="a.account_id">
+              <td class="cell-name mono">{{ a.account_id }}<span class="muted" style="font-size:11px"> · {{ a.description }}</span></td>
+              <td style="text-align:center">
+                <label class="perm-toggle read"><input type="checkbox" v-model="permModal.perms[a.account_id].read" /><span class="switch"></span></label>
+              </td>
+              <td style="text-align:center">
+                <label class="perm-toggle write"><input type="checkbox" v-model="permModal.perms[a.account_id].write" @change="() => { if (permModal.perms[a.account_id].write) permModal.perms[a.account_id].read = true }" /><span class="switch"></span></label>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <template #footer>
+        <button class="btn btn-ghost" @click="permModal = null">取消</button>
+        <button class="btn btn-primary" :disabled="savingPerms" @click="savePerms">{{ savingPerms ? '保存中…' : '保存' }}</button>
+      </template>
+    </Modal>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { getTokens, createToken, deleteToken, getServers } from '../api/index.js'
+import { getTokens, createToken, deleteToken, getServers, getAliyunAccounts, getAliyunPerms, putAliyunPerms } from '../api/index.js'
 import Modal from '../components/Modal.vue'
 
 /* ── state ── */
@@ -102,6 +134,9 @@ const error = ref('')
 const creating = ref(false)
 const tokenQuery = ref('')
 const tokenModal = ref(null)
+const permModal = ref(null)
+const permAccounts = ref([])
+const savingPerms = ref(false)
 
 /* ── computed ── */
 const filteredTokens = computed(() =>
@@ -181,6 +216,38 @@ async function doDelete(t) {
     await loadTokens()
   } catch (e) {
     error.value = '删除失败: ' + e.message
+  }
+}
+
+/* ── aliyun account permission matrix ── */
+async function openPerms(t) {
+  savingPerms.value = false
+  try {
+    const [accounts, perms] = await Promise.all([getAliyunAccounts(), getAliyunPerms(t.id)])
+    permAccounts.value = accounts
+    const map = {}
+    accounts.forEach(a => { map[a.account_id] = perms.permissions[a.account_id] || { read: false, write: false } })
+    permModal.value = { token_id: t.id, token_name: t.name, perms: map }
+  } catch (e) {
+    error.value = '加载授权矩阵失败: ' + e.message
+  }
+}
+
+async function savePerms() {
+  const m = permModal.value
+  savingPerms.value = true; error.value = ''
+  try {
+    const active = {}
+    for (const [accountId, p] of Object.entries(m.perms)) {
+      if (p.read || p.write) active[accountId] = { read: p.read, write: p.write }
+    }
+    await putAliyunPerms(m.token_id, active)
+    permModal.value = null
+    await loadTokens()
+  } catch (e) {
+    error.value = '保存授权失败: ' + e.message
+  } finally {
+    savingPerms.value = false
   }
 }
 
