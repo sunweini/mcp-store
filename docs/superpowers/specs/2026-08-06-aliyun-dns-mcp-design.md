@@ -45,10 +45,12 @@ MCP Client
 aliyndns:token_accounts:{token_id}          Hash — 账户级授权（权威）
   field: {account_id} → JSON {"read": bool, "write": bool}
   不变式：write ⇒ read（要改记录必须能查记录；UI 强制）
+  MCP 侧防御式判定：read 权限 = read or write（防 Redis 手改出违反不变式的数据）
 
 tokens:{hash}                                Hash — 现有 gateway token（union 自动同步）
-  permissions["aliyun-dns"] = {"read": any_read, "write": any_write}
+  permissions["aliyun-dns-mcp"] = {"read": any_read, "write": any_write}
   由 gateway-admin 保存授权矩阵时按 union 写，保证写工具可见性
+  （server 名 = 目录名 aliyun-dns-mcp，同 tavily-mcp/serpapi-mcp 注册模式）
 ```
 
 ### 3.2 执行
@@ -99,7 +101,6 @@ tokens:{hash}                                Hash — 现有 gateway token（uni
 - `add_record` data：`{record_id}`
 - `update_record` data：`{record_id}`
 - `delete_record` data：`{record_id}`
-- 主表无 FTotalAmount 类似字段（Alidns 无此字段），API 字段以阿里云文档为准
 
 ## 5. 数据模型（Redis）
 
@@ -117,7 +118,8 @@ aliyndns:accounts:index                     Set — 全部 account_id（管理�
 aliyndns:token_accounts:{token_id}          Hash — 账户级授权（见 §3.1）
 
 aliyndns:changed                            Pub/Sub — 账户/授权变更通知
-  {"action": "upsert"|"delete", "key": "accounts:{account_id}"|"token_accounts:{token_id}"}
+  {"action": "upsert"|"delete", "key": "aliyndns:accounts:{account_id}"|"aliyndns:token_accounts:{token_id}"}
+  key 为完整 Redis key（含 aliyndns: 前缀）
 ```
 
 设计要点：
@@ -164,7 +166,7 @@ aliyun-dns-mcp/
 - 凭证字段输入掩码、禁入审计日志
 
 **页面 B：token×账户授权矩阵**
-- 入口：Token 列表 → token 详情页，嵌入授权矩阵；列=该 token 可见的账户，单元格 read/write 勾选，write 强制连带 read
+- 入口：Token 列表 → token 详情页，嵌入授权矩阵；列=**全部托管账户**（勾选=授予该 token），单元格 read/write 勾选，write 强制连带 read
 - 保存时：
   1. 写 `aliyndns:token_accounts:{token_id}`（权威）
   2. 计算 union 更新 `tokens:{hash}` 的 `aliyun-dns` read/write（工具可见性）
@@ -172,6 +174,7 @@ aliyun-dns-mcp/
 
 - **探活**：添加/修改账户凭证时，用该账户凭证调 DescribeDomains（PageSize=1）验证 AccessKey 有效；失败提示、不落库（可勾选跳过）
 - 探活消耗 0 配额（查询免费），与 search-mcp key 探活不同
+- 探活意味着 gateway-admin 后端引入 Alidns SDK 依赖（与 MCP 共用 SDK，版本对齐）
 
 ### 6.3 gateway-proxy
 
@@ -196,6 +199,8 @@ aliyun-dns-mcp/
 
 > 错误码为示例，**实现时以实测为准**（阿里云 SDK 错误信息含 request_id，分类判定写测试回归）。
 
+**内部分类 → 对外 error_type 映射**：INVALID_CREDENTIAL→`account_disabled`（并告警）；THROTTLED→`throttled`；NOT_FOUND/API_ERROR→`aliyun_api_error`；网络/超时→`network_error`；授权失败→`no_permission`；`tokens:{hash}` 查无→`invalid_token`。
+
 ## 8. 可观测性 / 错误处理 / 测试
 
 ### 8.1 可观测性（OBS 规范）
@@ -203,12 +208,12 @@ aliyun-dns-mcp/
 - structlog 结构化 key=value + OTel trace 注入；`LOG_FORMAT=json` 生产
 - Traces：FastMCP 自动 span；AlidnsClient 每 API 调用一个 span（`aliyun_client.{api}`），失败 RecordError+SetStatus
 - Metrics：`aliyndns_operations_total{operation,status}`、`aliyndns_operation_duration_seconds{operation}`、`aliyndns_api_duration_seconds{api}`、`aliyndns_errors_total{error_type}`、`aliyndns_accounts{state}`——低基数 label，无 account_id 入 metric
-- **敏感防线**：AccessKey/Secret/token 明文禁入日志与 label；httpx logger 提 WARNING（防 query 泄漏，本项目不走 query 但保持）
+- **敏感防线**：AccessKey/Secret/token 明文禁入日志与 label；httpx logger 提 WARNING——SDK RPC 请求 URL query 含 `AccessKeyId`，防 URL 日志泄漏
 
 ### 8.2 错误处理
 
 - 授权失败 → `ToolError("permission denied on account {account_id} for {mode}")`，error_type=`no_permission`
-- 账户不存在/禁用 → `ToolError` 明确 message
+- 账户未托管（`aliyndns:accounts:index` 查无）→ error_type=`account_not_found`；账户禁用（`enabled=false` 或凭证失效被标禁）→ error_type=`account_disabled`
 - token 无效（`tokens:{hash}` 查无）→ error_type=`invalid_token`
 - Alidns 错误按 §7.1 分类，含 `request_id` 供阿里云侧排查
 
