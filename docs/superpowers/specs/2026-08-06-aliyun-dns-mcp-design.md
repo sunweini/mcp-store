@@ -164,6 +164,7 @@ aliyun-dns-mcp/
 - CRUD：id/description/AccessKeyId/AccessKeySecret/region/enabled
 - 写 `aliyndns:accounts:{id}` + index + PUBLISH `aliyndns:changed`
 - 凭证字段输入掩码、禁入审计日志
+- 删除账户时同步清理所有 `aliyndns:token_accounts:*` 中该账户的引用（防僵尸授权）
 
 **页面 B：token×账户授权矩阵**
 - 入口：Token 列表 → token 详情页，嵌入授权矩阵；列=**全部托管账户**（勾选=授予该 token），单元格 read/write 勾选，write 强制连带 read

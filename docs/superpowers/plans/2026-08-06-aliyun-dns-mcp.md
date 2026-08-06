@@ -203,8 +203,11 @@ async def test_credentials_normalize_enabled(fake_redis):
 async def test_get_token_perms_lazy_load(fake_redis):
     _seed_token_perms(fake_redis)
     store = AccountStore(fake_redis)
+    assert store.get_token_perms("tokid_1") == {}  # 未加载 → 空
+    await store.ensure_token_loaded("tokid_1")
     assert store.get_token_perms("tokid_1") == {"acct1": {"read": True, "write": False}}
     # 未授权 token → 空 dict
+    await store.ensure_token_loaded("tokid_none")
     assert store.get_token_perms("tokid_none") == {}
 
 
@@ -212,7 +215,7 @@ async def test_get_token_perms_lazy_load(fake_redis):
 async def test_hot_reload_on_channel_message(fake_redis):
     _seed_account(fake_redis, account_id="acct1")
     store = AccountStore(fake_redis)
-    await store.load_all()
+    await store.start()
     # 新增账户 + publish → 监听循环 reload
     _seed_account(fake_redis, account_id="acct2")
     await fake_redis.publish(CHANGE_CHANNEL, json.dumps({"action": "upsert", "key": "aliyndns:accounts:acct2"}))
@@ -222,9 +225,10 @@ async def test_hot_reload_on_channel_message(fake_redis):
         if store.account_ids() == {"acct1", "acct2"}:
             break
     assert store.account_ids() == {"acct1", "acct2"}
+    await store.close()
 ```
 
-注意 `fake_redis` fixture 在 `tests/conftest.py` 定义（Step 2）。`test_hot_reload` 需要 store 的 listener 已启动——这里直接调用 `load_all()` 后启动 listener 由 `start()` 做，测试里单独验证消息处理路径需要手动 start；**修正**：该测试用 `await store.start()` 替代 load_all（Step 2 的 conftest 提供 fake_redis）。
+注意 `fake_redis` fixture 在 `tests/conftest.py` 定义（Step 2）。`test_hot_reload_on_channel_message` 用 `store.start()`（启动 listener 任务并加载全量）并 `store.close()` 清理任务。
 
 - [ ] **Step 2: conftest + 跑测试确认失败**
 
@@ -241,24 +245,6 @@ async def fake_redis():
     fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
     yield fake
     await fake.aclose()
-```
-
-同时把 Step 1 的 `test_hot_reload_on_channel_message` 改为用 `store.start()`（它会启动 listener 任务）：
-
-```python
-@pytest.mark.asyncio
-async def test_hot_reload_on_channel_message(fake_redis):
-    _seed_account(fake_redis, account_id="acct1")
-    store = AccountStore(fake_redis)
-    await store.start()
-    _seed_account(fake_redis, account_id="acct2")
-    await fake_redis.publish(CHANGE_CHANNEL, json.dumps({"action": "upsert", "key": "aliyndns:accounts:acct2"}))
-    for _ in range(20):
-        await asyncio.sleep(0.1)
-        if store.account_ids() == {"acct1", "acct2"}:
-            break
-    assert store.account_ids() == {"acct1", "acct2"}
-    await store.close()
 ```
 
 Run: `cd aliyun-dns-mcp && uv run python -m pytest tests/test_account_store.py -q`
@@ -393,38 +379,12 @@ class AccountStore:
                 await asyncio.sleep(5)
 ```
 
-- [ ] **Step 4: 修正权限懒加载——get_token_perms 需异步**
-
-Task 2 接口里 `get_token_perms` 是同步的，但懒加载要查 Redis。**改为异步**：工具层在启动时或首次调用前触发加载。简化：`AccountStore` 增加 `async ensure_token_loaded(token_id)`，`get_token_perms` 保持同步（仅读缓存，未加载返回 `{}`）。`auth.py` 每次校验先 `await store.ensure_token_loaded(token_id)` 再读缓存。
-
-在 account_store.py 增加：
-
-```python
-    async def ensure_token_loaded(self, token_id: str) -> None:
-        """确保某 token 的权限已加载（懒加载入口）。"""
-        if token_id not in self._token_perms_cache:
-            await self.load_token_perms(token_id)
-```
-
-并修改 Step 3 中 `get_token_perms` 注释：未加载时返回 `{}`（调用方必须先 ensure）。测试相应调整：
-
-```python
-@pytest.mark.asyncio
-async def test_get_token_perms_lazy_load(fake_redis):
-    _seed_token_perms(fake_redis)
-    store = AccountStore(fake_redis)
-    await store.ensure_token_loaded("tokid_1")
-    assert store.get_token_perms("tokid_1") == {"acct1": {"read": True, "write": False}}
-    await store.ensure_token_loaded("tokid_none")
-    assert store.get_token_perms("tokid_none") == {}
-```
-
-- [ ] **Step 5: 跑测试确认通过**
+- [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd aliyun-dns-mcp && uv run python -m pytest tests/test_account_store.py -q`
 Expected: PASS（4 tests）
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add aliyun-dns-mcp/account_store.py aliyun-dns-mcp/tests/
@@ -1912,22 +1872,21 @@ def test_list_accounts_masks_secrets(no_probe, client, fake_redis, auth_headers)
     assert "access_key_secret" not in data[0]
 
 
-def test_update_account(no_probe, client, fake_redis, auth_headers):
+def test_delete_account_cleans_token_perms(no_probe, client, fake_redis, auth_headers):
+    """删除账户时清理所有 token 授权映射中的该账户引用（防僵尸授权）。"""
     client.post("/api/aliyun-accounts", json={
         "account_id": "acct1", "access_key_id": "a", "access_key_secret": "s"}, headers=auth_headers)
-    resp = client.put("/api/aliyun-accounts/acct1", json={"description": "新描述", "enabled": False},
-                      headers=auth_headers)
-    assert resp.status_code == 200
-    assert resp.json()["enabled"] is False
-    assert await fake_redis.hget("aliyndns:accounts:acct1", "description") == "新描述"
-
-
-def test_delete_account(no_probe, client, fake_redis, auth_headers):
-    client.post("/api/aliyun-accounts", json={
-        "account_id": "acct1", "access_key_id": "a", "access_key_secret": "s"}, headers=auth_headers)
+    # 直接写 Redis 造授权映射（不经 API，模拟已有授权）
+    import json as _json
+    await fake_redis.hset("aliyndns:token_accounts:tokid_1", "acct1",
+                          _json.dumps({"read": True, "write": False}))
+    await fake_redis.hset("aliyndns:token_accounts:tokid_1", "acct2",
+                          _json.dumps({"read": True, "write": False}))
     resp = client.delete("/api/aliyun-accounts/acct1", headers=auth_headers)
     assert resp.status_code == 204
-    assert not await fake_redis.sismember("aliyndns:accounts:index", "acct1")
+    remaining = await fake_redis.hgetall("aliyndns:token_accounts:tokid_1")
+    assert "acct1" not in remaining
+    assert "acct2" in remaining
 ```
 
 - [ ] **Step 3: 写失败测试（授权矩阵 + union 同步）**
@@ -2161,7 +2120,7 @@ async def create_account(req: AccountCreate, _: str = Depends(require_admin)):
         if not result["ok"]:
             # 探活失败不阻断添加（管理员可能先入库后修复）；错误提示前台可见
             probe_error = result["error"]
-    await r.hset(f"aliyndns:accounts:{req.account_id}", mapping={
+    await r.hset(f"aliyndns:accounts:{account_id}", mapping={
         "access_key_id": req.access_key_id,
         "access_key_secret": req.access_key_secret,
         "description": req.description,
@@ -2180,7 +2139,6 @@ async def create_account(req: AccountCreate, _: str = Depends(require_admin)):
         "enabled": req.enabled,
         "probe_error": probe_error,
     }
-
 
 @router.put("/{account_id}")
 async def update_account(account_id: str, req: AccountUpdate, _: str = Depends(require_admin)):
@@ -2228,6 +2186,10 @@ async def delete_account(account_id: str, _: str = Depends(require_admin)):
     if not removed:
         raise HTTPException(status_code=404, detail="account not found")
     await r.srem(ACCOUNTS_INDEX, account_id)
+    # 清理授权引用：删除账户时从所有 token 的授权映射移除该账户
+    # （防僵尸授权——MCP 侧虽有 account_not_found 兜底，数据应保持干净）
+    async for key in r.scan_iter(match="aliyndns:token_accounts:*"):
+        await r.hdel(key, account_id)
     await _publish("delete", account_id)
     logger.info("aliyun_account_deleted", account_id=account_id, service="gateway-admin")
     return None
