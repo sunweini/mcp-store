@@ -29,7 +29,6 @@ class FakeSDKClient:
             raise err
         domain = type("D", (), {"domain_name": "example.com", "dns_servers": ["ns1"], "record_count": 2})()
         return FakeSDKResponse(type("B", (), {"domains": type("L", (), {"domain": [domain]})})())
-
     def describe_domain_records_with_options(self, request, runtime):
         self.calls.append(("describe_domain_records", request))
         rec = type("R", (), {"record_id": "r1", "rr": "@", "type": "A", "value": "1.2.3.4",
@@ -207,6 +206,34 @@ async def test_describe_domains_maps_response(monkeypatch):
     domains = await client.describe_domains(page_size=10, page_num=1)
     assert domains == [{"domain_name": "example.com", "dns_servers": ["ns1"], "record_count": 2}]
     assert sdk.calls[0][0] == "describe_domains"
+
+
+@pytest.mark.asyncio
+async def test_describe_domains_object_dns_servers(monkeypatch):
+    """真实 SDK 响应形态回归：dns_servers 是对象（含 .dns_server list）非 list。
+
+    生产实测：DescribeDomainsResponseBodyDomainsDomainDnsServers 对象直接
+    list() 报 not iterable——fake 用 ["ns1"] 掩盖了真实形态（Task 4 漏网）。
+    """
+    class FakeDnsServers:
+        dns_server = ["ns1", "ns2"]
+
+    class FakeDomain:
+        domain_name = "example.com"
+        dns_servers = FakeDnsServers()
+        record_count = 3
+
+    class FakeBody:
+        domains = type("L", (), {"domain": [FakeDomain()]})()
+
+    class FakeSdk:
+        def describe_domains_with_options(self, request, runtime):
+            return FakeSDKResponse(FakeBody())
+
+    monkeypatch.setattr("aliyun_client.AlidnsClient._make_sdk", lambda self: FakeSdk())
+    client = AlidnsClient({"access_key_id": "a", "access_key_secret": "s", "region": "cn-hangzhou", "enabled": True})
+    domains = await client.describe_domains()
+    assert domains == [{"domain_name": "example.com", "dns_servers": ["ns1", "ns2"], "record_count": 3}]
 
 
 @pytest.mark.asyncio

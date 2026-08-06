@@ -113,6 +113,20 @@ def classify_error(exc: Exception) -> str:
     return "api_error"
 
 
+def _extract_dns_servers(dns_servers) -> list[str]:
+    """兼容两种 DNS 服务器响应形态：对象（.dns_server list）或直接 list。
+
+    真实 SDK 是前者（DescribeDomainsResponseBodyDomainsDomainDnsServers），
+    fake/未来版本可能是后者——统一提取，防 not iterable 崩。
+    """
+    if dns_servers is None:
+        return []
+    servers = getattr(dns_servers, "dns_server", None)
+    if servers is not None:
+        return list(servers)
+    return list(dns_servers)
+
+
 class AlidnsClient:
     def __init__(self, credentials: dict):
         from darabonba.runtime import RuntimeOptions
@@ -199,7 +213,10 @@ class AlidnsClient:
         domains = self._body(resp).domains.domain or []
         return [{
             "domain_name": d.domain_name,
-            "dns_servers": list(getattr(d, "dns_servers", None) or []),
+            # NOTE: 真实 SDK 响应里 dns_servers 是 DnsServers 对象（含 .dns_server
+            # list），不是 list——直接 list() 会报 not iterable（生产实测，
+            # fake 测试用 ["ns1"] 掩盖了真实形态）。兼容两种形态提取
+            "dns_servers": _extract_dns_servers(getattr(d, "dns_servers", None)),
             "record_count": getattr(d, "record_count", None),
         } for d in domains]
 
