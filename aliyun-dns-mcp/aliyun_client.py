@@ -25,6 +25,9 @@ class AlidnsError(Exception):
 
     def __init__(self, error_type: str, message: str, request_id: str | None = None):
         super().__init__(message)
+        # NOTE: 工具层错误映射用 e.message 拼返回结构（spec §7.1），
+        # Exception 无该属性（Python 2 后移除），显式暴露
+        self.message = message
         self.error_type = error_type
         self.request_id = request_id
 
