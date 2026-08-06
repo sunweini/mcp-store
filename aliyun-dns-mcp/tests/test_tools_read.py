@@ -22,7 +22,12 @@ class FakeChecker:
 
 
 class FakeClient:
+    def __init__(self, fail=None):
+        self.fail = fail
+
     async def describe_domains(self, page_size=100, page_num=1):
+        if self.fail:
+            raise self.fail
         return [{"domain_name": "example.com", "dns_servers": ["ns1"], "record_count": 2}]
 
 
@@ -36,8 +41,18 @@ class FakeClients:
         return self._client
 
 
-def make_ctx(checker=None, clients=None):
-    return ToolContext(checker=checker or FakeChecker(), clients=clients or FakeClients())
+class FakeStore:
+    """记录 disable_account 调用（I3 工具层联动的假 store）。"""
+    def __init__(self):
+        self.disabled = []
+
+    async def disable_account(self, account_id):
+        self.disabled.append(account_id)
+
+
+def make_ctx(checker=None, clients=None, store=None):
+    return ToolContext(checker=checker or FakeChecker(), clients=clients or FakeClients(),
+                       store=store)
 
 
 @pytest.mark.asyncio
@@ -81,3 +96,26 @@ async def test_list_domains_account_missing():
     result = await list_domains("ghost", ctx=ctx)
     assert result["status"] == "error"
     assert result["error_type"] == "account_not_found"
+
+
+@pytest.mark.asyncio
+async def test_invalid_credential_disables_account():
+    """I3 回归（spec §7.1）：工具层收到 invalid_credential → 账户被禁用。"""
+    store = FakeStore()
+    ctx = make_ctx(clients=FakeClients(client=FakeClient(fail=AlidnsError(
+        "invalid_credential", "InvalidAccessKeyId.NotFound", "req-1"))), store=store)
+    result = await list_domains("acct1", ctx=ctx)
+    assert result["status"] == "error"
+    assert result["error_type"] == "invalid_credential"
+    assert store.disabled == ["acct1"]
+
+
+@pytest.mark.asyncio
+async def test_non_credential_error_does_not_disable():
+    """I3 边界：非 invalid_credential 错误不触发禁用。"""
+    store = FakeStore()
+    ctx = make_ctx(clients=FakeClients(client=FakeClient(fail=AlidnsError(
+        "throttled", "Throttling.User", "req-1"))), store=store)
+    result = await list_domains("acct1", ctx=ctx)
+    assert result["error_type"] == "throttled"
+    assert store.disabled == []

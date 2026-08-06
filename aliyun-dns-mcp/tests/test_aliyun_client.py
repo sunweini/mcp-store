@@ -1,7 +1,7 @@
 """AlidnsClient 封装测试：mock 内部 SDK 对象，验证参数映射与错误分类。"""
 import pytest
 
-from aliyun_client import AlidnsError, AlidnsClient, ClientFactory, classify_error
+from aliyun_client import AlidnsError, AlidnsClient, ClientFactory, classify_error, _redact_network_message
 from account_store import AccountStore
 
 
@@ -24,7 +24,9 @@ class FakeSDKClient:
     def describe_domains_with_options(self, request, runtime):
         self.calls.append(("describe_domains", request))
         if "domains_error" in self.script:
-            raise self.script["domains_error"]
+            # 一次性错误：取走后不再触发（重试路径用——首次抛错第二次成功）
+            err = self.script.pop("domains_error")
+            raise err
         domain = type("D", (), {"domain_name": "example.com", "dns_servers": ["ns1"], "record_count": 2})()
         return FakeSDKResponse(type("B", (), {"domains": type("L", (), {"domain": [domain]})})())
 
@@ -53,6 +55,13 @@ class FakeCredentialsStore:
         return self._creds.get(account_id)
 
 
+def _make_client(monkeypatch, sdk):
+    """公共构造：monkeypatch _make_sdk 注入 fake，返回 AlidnsClient。"""
+    monkeypatch.setattr("aliyun_client.AlidnsClient._make_sdk", lambda self: sdk)
+    return AlidnsClient({"access_key_id": "a", "access_key_secret": "s",
+                         "region": "cn-hangzhou", "enabled": True})
+
+
 def test_classify_error():
     err = type("E", (), {"code": "InvalidAccessKeyId.NotFound"})()
     assert classify_error(err) == "invalid_credential"
@@ -60,6 +69,89 @@ def test_classify_error():
     assert classify_error(err2) == "throttled"
     err3 = type("E", (), {"code": "SomethingElse"})()
     assert classify_error(err3) == "api_error"
+
+
+def test_classify_network_error():
+    """网络异常（含 URL query 的 ConnectionError 形态）必须分类为 network_error。"""
+    url_msg = ("HTTPSConnectionPool(host='alidns.cn-hangzhou.aliyuncs.com', port=443): "
+               "Max retries exceeded ...: GET https://alidns.cn-hangzhou.aliyuncs.com/?"
+               "AccessKeyId=LTAI5t-demo-secret-value&Signature=abc&version=2015-01-09")
+    assert classify_error(ConnectionError(url_msg)) == "network_error"
+    assert classify_error(TimeoutError(url_msg)) == "network_error"
+
+
+def test_redact_network_message_strips_query():
+    """剥离消息中 "?" 之后的 query——AccessKeyId 明文不得出现在任何消息里。"""
+    msg = ("HTTPSConnectionPool(host='alidns.cn-hangzhou.aliyuncs.com', port=443): "
+           "Max retries exceeded ...: GET https://alidns.cn-hangzhou.aliyuncs.com/?"
+           "AccessKeyId=LTAI5t-demo-secret-value&Signature=abc&version=2015-01-09")
+    err = ConnectionError(msg)
+    redacted = _redact_network_message(err)
+    assert "AccessKeyId" not in redacted
+    assert "LTAI5t-demo-secret-value" not in redacted
+    assert redacted.startswith("ConnectionError: ")
+    # 主机名保留（无敏感信息），query 全部丢弃
+    assert "alidns.cn-hangzhou.aliyuncs.com" in redacted
+    assert "?" not in redacted
+
+
+@pytest.mark.asyncio
+async def test_network_error_sanitized_in_log_and_span(monkeypatch, caplog):
+    """I1 回归：网络错误消息不进日志/span/异常 message（含 URL 时必须剥离）。"""
+    import logging
+    from opentelemetry import trace as otel_trace
+
+    url_msg = ("HTTPSConnectionPool(host='alidns.cn-hangzhou.aliyuncs.com', port=443): "
+               "Max retries exceeded ...: GET https://alidns.cn-hangzhou.aliyuncs.com/?"
+               "AccessKeyId=LTAI5t-demo-secret-value&Signature=abc&version=2015-01-09")
+    sdk = FakeSDKClient(script={"domains_error": ConnectionError(url_msg)})
+    client = _make_client(monkeypatch, sdk)
+    caplog.set_level(logging.ERROR)
+    with pytest.raises(AlidnsError) as e:
+        await client.describe_domains()
+    # 三路径（日志 / span 描述 / 工具响应 message）都不含凭证
+    assert "LTAI5t-demo-secret-value" not in caplog.text
+    assert "AccessKeyId" not in caplog.text
+    assert e.value.error_type == "network_error"
+    assert "AccessKeyId" not in e.value.message
+    assert "LTAI5t-demo-secret-value" not in e.value.message
+
+
+@pytest.mark.asyncio
+async def test_throttled_retries_once_then_succeeds(monkeypatch):
+    """I2 回归（spec §7.1）：首次 throttled → 退避重试 1 次 → 成功。"""
+    # 缩短退避：单测不真等 1s（重试语义与 sleep 时长无关）
+    async def _no_sleep(_):
+        return None
+    monkeypatch.setattr("aliyun_client.asyncio.sleep", _no_sleep)
+    sdk = FakeSDKClient(script={"domains_error": type(
+        "E", (Exception,), {"code": "Throttling.User", "message": "QPS limit"})()})
+    client = _make_client(monkeypatch, sdk)
+    domains = await client.describe_domains()
+    assert domains == [{"domain_name": "example.com", "dns_servers": ["ns1"], "record_count": 2}]
+    # 重试后成功：SDK 被调 2 次（首次抛 throttled + 重试成功）
+    assert len(sdk.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_throttled_retry_fails_after_one_retry(monkeypatch):
+    """I2 边界：重试后仍 throttled → 不再重试直接报错（防死循环）。"""
+    async def _no_sleep(_):
+        return None
+    monkeypatch.setattr("aliyun_client.asyncio.sleep", _no_sleep)
+
+    class AlwaysThrottleSDK(FakeSDKClient):
+        def describe_domains_with_options(self, request, runtime):
+            self.calls.append(("describe_domains", request))
+            raise type("E", (Exception,), {"code": "Throttling.User", "message": "QPS limit"})()
+
+    sdk = AlwaysThrottleSDK()
+    client = _make_client(monkeypatch, sdk)
+    with pytest.raises(AlidnsError) as e:
+        await client.describe_domains()
+    assert e.value.error_type == "throttled"
+    # 首调 + 1 次重试，绝无第 3 次
+    assert len(sdk.calls) == 2
 
 
 @pytest.mark.asyncio
@@ -86,14 +178,17 @@ async def test_add_domain_record_returns_id(monkeypatch):
 @pytest.mark.asyncio
 async def test_aliyun_error_wrapped(monkeypatch):
     # 错误对象必须派生 BaseException 才能被 raise（空 bases 的对象 raise 会变
-    # TypeError，code/request_id 全部丢失）；(Exception,) 基类保持 type() 动态风格
-    sdk = FakeSDKClient(script={"domains_error": type("E", (Exception,), {"code": "Throttling.User", "request_id": "req-1"})()})
+    # TypeError，code/request_id 全部丢失）；(Exception,) 基类保持 type() 动态风格。
+    # 非 throttled 错误不触发重试，一次性语义由 FakeSDKClient pop 保证
+    sdk = FakeSDKClient(script={"domains_error": type("E", (Exception,), {"code": "InvalidAccessKeyId.NotFound", "request_id": "req-1"})()})
     monkeypatch.setattr("aliyun_client.AlidnsClient._make_sdk", lambda self: sdk)
     client = AlidnsClient({"access_key_id": "a", "access_key_secret": "s", "region": "cn-hangzhou", "enabled": True})
     with pytest.raises(AlidnsError) as e:
         await client.describe_domains()
-    assert e.value.error_type == "throttled"
+    assert e.value.error_type == "invalid_credential"
     assert e.value.request_id == "req-1"
+    # 非 throttled 不重试：SDK 只被调 1 次
+    assert len(sdk.calls) == 1
 
 
 @pytest.mark.asyncio

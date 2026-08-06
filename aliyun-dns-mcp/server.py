@@ -75,7 +75,8 @@ def _init_runtime() -> None:
 def _get_ctx() -> ToolContext:
     if _checker is None or _clients is None:
         raise RuntimeError("runtime not initialized — call _init_runtime()")
-    return ToolContext(checker=_checker, clients=_clients)
+    # store 注入工具层：I3 凭证失效时工具层直接 disable_account（幂等+热更新）
+    return ToolContext(checker=_checker, clients=_clients, store=_store)
 
 
 _configure_logging()

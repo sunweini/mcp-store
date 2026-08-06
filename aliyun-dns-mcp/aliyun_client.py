@@ -4,13 +4,20 @@
 RPC 签名/端点选择/错误对象解析交给 SDK，MCP 层只做错误分类与 trace。
 SDK 是同步 API，异步工具里用 asyncio.to_thread 防阻塞 event loop。
 
-安全：SDK RPC 请求 URL query 含 AccessKeyId——httpx logger 必须提到
-WARNING（logging_config 处理），日志只记 account_id 不记凭证。
+安全：SDK RPC 请求 URL query 含 AccessKeyId。两层防线：
+1. logging_config 把可能打印请求日志的库 logger（httpx/requests/urllib3/
+   aiohttp）整体提到 WARNING；
+2. 网络异常消息可能自带完整 URL（requests ConnectionError 消息含
+   "GET https://.../?AccessKeyId=<明文>&Signature=..."）——_call 在
+   分类为 network_error 时剥离 query，凭证永不进日志/工具响应
+   （spec §8.1 敏感防线，I1）。
+日志只记 account_id 不记凭证。
 """
 from __future__ import annotations  # ClientFactory.__init__ 注解引用 AccountStore（仅类型），不引入运行时 import
 
 import asyncio
 import time
+import urllib3.exceptions
 
 import structlog
 from opentelemetry import trace
@@ -23,6 +30,53 @@ logger = structlog.get_logger()
 tracer = trace.get_tracer("aliyun-dns-mcp")
 
 ALIDNS_ENDPOINT = "alidns.cn-hangzhou.aliyuncs.com"
+
+# 网络层异常基类集合（classify_error 用）——requests/urllib3/aiohttp 是 SDK
+# 传递依赖（锁文件确认存在），延迟 import 避免模块加载即需要它们。
+# urllib3 已在本模块显式 import：其异常在 requests/aiohttp 包装前往往
+# 直接抛出（urllib3.exceptions.ConnectionError 等均继承 HTTPError，取基类
+# 一网打尽），是最底层证据，必须可判定。
+_NETWORK_EXC_TYPES = (
+    TimeoutError,
+    ConnectionError,
+    urllib3.exceptions.HTTPError,
+)
+
+
+def _looks_like_network_exception(exc: Exception) -> bool:
+    """判定异常是否来自网络层（模块加载后补测可导入的类型）。
+
+    返回 True 则消息可能含完整 URL query（AccessKeyId 明文），必须走
+    剥离逻辑。延迟探测而不是模块顶层 import requests：requests 是 SDK
+    传递依赖，间接 import 会让本模块硬依赖它，破坏可测性（单测用假
+    SDK 对象，环境未装 requests 时也应可运行）。
+    """
+    if isinstance(exc, _NETWORK_EXC_TYPES):
+        return True
+    # requests 异常类（requests.exceptions.*，含 ConnectionError/Timeout 等）
+    # 与 aiohttp 异常（aiohttp.ClientError 族）延迟 import 判定——仅在有
+    # 具体异常实例时才 import，正常路径零成本。
+    for mod_name in ("requests.exceptions", "aiohttp"):
+        try:
+            mod = __import__(mod_name, fromlist=["*"])
+        except ImportError:
+            continue
+        if isinstance(exc, mod.RequestException if mod_name == "requests.exceptions" else mod.ClientError):
+            return True
+    return False
+
+
+def _redact_network_message(exc: Exception) -> str:
+    """网络异常 → 无凭证的安全消息：异常类型名 + 截断到 query 之前。
+
+    为什么截断到 "?"：requests ConnectionError 消息格式为
+    "HTTPSConnectionPool(host='...', port=443): Max retries exceeded ...: "
+    "GET https://alidns.cn-hangzhou.aliyuncs.com/?AccessKeyId=<明文>&Signature=..."，
+    "?" 之后的整段 query 只有签名参数，没有任何诊断价值——URL 主机名保留
+    （无敏感信息），query 一律丢弃（不白名单参数名，防未来新增参数漏判）。
+    """
+    head = str(exc).split("?", 1)[0].strip()
+    return f"{type(exc).__name__}: {head}" if head else type(exc).__name__
 
 
 class AlidnsError(Exception):
@@ -43,6 +97,10 @@ def classify_error(exc: Exception) -> str:
     错误码为示例，以实测为准（spec §7.1）——SDK 异常对象带 .code 与
     .message，这里组合文本匹配，避免裸 code 匹配漏掉变体。
     """
+    # 网络层异常优先判定：请求根本没到达阿里云，任何文本匹配都无意义，
+    # 且其消息可能含完整 URL query（AccessKeyId 明文，spec §8.1 敏感防线）
+    if _looks_like_network_exception(exc):
+        return "network_error"
     code = str(getattr(exc, "code", ""))
     msg = str(exc)
     combined = (code + " " + msg).lower()
@@ -72,7 +130,7 @@ class AlidnsClient:
             endpoint=ALIDNS_ENDPOINT,
         ))
 
-    async def _call(self, api_name: str, request, span_name: str):
+    async def _call(self, api_name: str, request, span_name: str, _retried: bool = False):
         def run():
             fn = getattr(self._sdk, api_name)
             # with_options 签名 (request, runtime) 第二个参数必传——缺它
@@ -87,16 +145,26 @@ class AlidnsClient:
             try:
                 return await asyncio.to_thread(run)
             except Exception as exc:
+                err_type = classify_error(exc)
+                # I2（spec §7.1「THROTTLED 短退避重试 1 次」）：限流是瞬时
+                # 状态（QPS 窗口），SDK 自身不带重试（RuntimeOptions 默认空），
+                # 公共入口统一退避一次覆盖全部工具方法。_retried 防死循环
+                # （重试后仍限流 → 直接报错，留给调用方/用户决策）。
+                if err_type == "throttled" and not _retried:
+                    await asyncio.sleep(1)
+                    return await self._call(api_name, request, span_name, _retried=True)
                 # OBS-MET-001: 依赖指标——失败记 dependency_errors_total
                 dep_errors = telemetry.DEPENDENCY_ERRORS_TOTAL
                 if dep_errors:
-                    dep_errors.add(1, attributes={"dependency": "alidns_api", "error_type": "api_error"})
+                    dep_errors.add(1, attributes={"dependency": "alidns_api", "error_type": err_type})
                 span.record_exception(exc)
-                span.set_status(trace.Status(trace.StatusCode.ERROR, str(exc)))
-                err_type = classify_error(exc)
+                # network_error 消息可能含完整 URL query（AccessKeyId 明文）：
+                # span 描述/log/工具响应共用剥离后的安全消息（spec §8.1）
+                safe_msg = _redact_network_message(exc) if err_type == "network_error" else str(exc)
+                span.set_status(trace.Status(trace.StatusCode.ERROR, safe_msg))
                 logger.error("aliyun_api_error", service="aliyun-dns-mcp",
-                             api=api_name, error_type=err_type, error=str(exc))
-                raise AlidnsError(err_type, str(exc), getattr(exc, "request_id", None)) from exc
+                             api=api_name, error_type=err_type, error=safe_msg)
+                raise AlidnsError(err_type, safe_msg, getattr(exc, "request_id", None)) from exc
             finally:
                 # 成功/失败都记延迟（histogram 带 status 区分）
                 duration = time.monotonic() - start

@@ -68,6 +68,54 @@ def test_create_account_probe_failure_marks_probe_error(monkeypatch, client, fak
     assert resp.json()["probe_error"] == "InvalidAccessKeyId.NotFound"
 
 
+async def test_probe_error_sanitized_when_contains_url(monkeypatch, client, fake_redis, auth_headers):
+    """I1 回归：网络错误消息含完整 URL query（AccessKeyId 明文）时必须裁剪。
+
+    probe_error 会落 Redis + 列表接口返回 + 前端展示——任何带凭证的内容
+    都是泄漏。SDK Client 构造抛 ConnectionError 走真实 _probe 的 except
+    路径（monkeypatch _probe 本身会绕过内部裁剪，是假回归）。
+    """
+    import api.aliyun_accounts as mod
+    import alibabacloud_alidns20150109.client as sdk_client_mod
+    url_msg = ("HTTPSConnectionPool(host='alidns.cn-hangzhou.aliyuncs.com', port=443): "
+               "Max retries exceeded ...: GET https://alidns.cn-hangzhou.aliyuncs.com/?"
+               "AccessKeyId=LTAI5t-demo-secret-value&Signature=abc&version=2015-01-09")
+    monkeypatch.setattr(sdk_client_mod.Client, "__init__",
+                        lambda self, config: (_ for _ in ()).throw(ConnectionError(url_msg)))
+    resp = client.post("/api/aliyun-accounts", json={
+        "account_id": "net-fail",
+        "access_key_id": "LTAI-x", "access_key_secret": "sk",
+    }, headers=auth_headers)
+    assert resp.status_code == 201
+    probe_error = resp.json()["probe_error"]
+    assert "AccessKeyId" not in probe_error
+    assert "LTAI5t-demo-secret-value" not in probe_error
+    assert "?" not in probe_error
+    # Redis 落库的 probe_error 同样已裁剪（列表接口/前端读取同一来源）
+    stored = await fake_redis.hget("aliyndns:accounts:net-fail", "probe_error")
+    assert "AccessKeyId" not in stored
+    # 列表接口返回值也不含凭证
+    list_resp = client.get("/api/aliyun-accounts", headers=auth_headers)
+    for acct in list_resp.json():
+        assert "AccessKeyId" not in (acct.get("probe_error") or "")
+        assert "LTAI5t-demo-secret-value" not in (acct.get("probe_error") or "")
+
+
+def test_safe_probe_error_strips_query():
+    """_safe_probe_error 纯函数：到 "?" 即截断，凭证与签名参数全丢弃。"""
+    import api.aliyun_accounts as mod
+    url_msg = ("HTTPSConnectionPool(host='alidns.cn-hangzhou.aliyuncs.com', port=443): "
+               "GET https://alidns.cn-hangzhou.aliyuncs.com/?AccessKeyId=LTAI-secret&Signature=x")
+    out = mod._safe_probe_error("", url_msg)
+    assert "AccessKeyId" not in out and "LTAI-secret" not in out and "?" not in out
+    # code 优先时同样裁剪（code 本身不含 query，防御式）
+    out2 = mod._safe_probe_error("InvalidAccessKeyId.NotFound", url_msg)
+    assert out2 == "InvalidAccessKeyId.NotFound"
+    # 无 query 的错误消息原样保留（截断到 200 字符）
+    long_msg = "x" * 300
+    assert len(mod._safe_probe_error("", long_msg)) == 200
+
+
 def test_create_account_duplicate_rejected(no_probe, client, fake_redis, auth_headers):
     client.post("/api/aliyun-accounts", json={
         "account_id": "acct1", "access_key_id": "a", "access_key_secret": "s"}, headers=auth_headers)

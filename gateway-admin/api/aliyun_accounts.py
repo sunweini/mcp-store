@@ -2,9 +2,8 @@
 
 Owns aliyndns:accounts:* Redis keys；aliyun-dns-mcp 读这些 key 做账户
 凭证与热更新。写 → PUBLISH aliyndns:changed 让 MCP 免重启刷新。
-AccessKey/Secret 明文存内网 Redis（与 gateway token 存储同策略），
-明文只在 POST create 响应返回一次……不，这里 POST 也不返回明文——
-探活用 SDK 后丢弃，响应只回 account_id/description/掩码。
+AccessKey/Secret 明文只存内网 Redis（与 gateway token 存储同策略），
+探活用 SDK 后丢弃，响应只回 account_id/description/掩码，明文永不回传。
 """
 import json
 import time
@@ -53,6 +52,18 @@ def _mask(key_id: str) -> str:
     return f"{key_id[:4]}…{key_id[-4:]}"
 
 
+def _safe_probe_error(code: str, msg: str) -> str:
+    """探活错误 → 落 Redis probe_error 的安全文本。
+
+    为什么裁剪：网络异常消息可能含完整请求 URL（requests ConnectionError
+    消息带 "GET https://.../?AccessKeyId=<明文>&Signature=..."），而
+    probe_error 会被落 Redis 并在列表接口/前端展示——任何带凭证的内容
+    都是泄漏（spec §8.1 敏感防线）。策略与 MCP 侧 _call 一致：到 "?" 即截断
+    （query 全是签名参数，无诊断价值），主机名保留。
+    """
+    return (code or msg[:200]).split("?", 1)[0]
+
+
 async def _publish(action: str, account_id: str) -> None:
     """PUBLISH 变更通知让 MCP 热更新。主操作已成功即成功，publish 失败只 warning。"""
     try:
@@ -88,8 +99,8 @@ async def _probe(access_key_id: str, access_key_secret: str, region: str) -> dic
         return {"ok": True}
     except Exception as e:
         code = getattr(e, "code", "")
-        msg = str(e)
-        return {"ok": False, "error": code or msg[:200]}
+        # probe_error 会落 Redis + 前端展示：必须裁剪可能含凭证的 URL query
+        return {"ok": False, "error": _safe_probe_error(code, str(e))}
 
 
 @router.get("")

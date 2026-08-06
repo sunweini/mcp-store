@@ -70,7 +70,9 @@ aliyndns:changed                        Pub/Sub — 账户/授权变更通知（
 
 返回结构：`{"status": "ok"|"error", "data": ..., "error_type": ..., "message": ..., "request_id": ...}`；鉴权失败抛 ToolError（`permission denied: {error_type}: {message}`）。
 
-错误分类（aliyun_client.py classify_error）：`invalid_credential` / `throttled` / `not_found` / `api_error`（SDK 异常全包成 AlidnsError，网络错误落到 api_error，见「已知注意事项」）。
+错误分类（aliyun_client.py classify_error）：`invalid_credential` / `throttled` / `not_found` / `network_error` / `api_error`（SDK 异常全包成 AlidnsError；网络异常消息含完整 URL query（AccessKeyId 明文）时剥离——网络错误不 500，且凭证不进日志/响应，见「踩坑记录」）。
+
+throttled 处理（spec §7.1）：`_call` 分类为 throttled 且未重试过时退避 1s 重试一次；重试后仍限流直接报错。invalid_credential 闭环（spec §7.1）：工具层收到 invalid_credential 时 `AccountStore.disable_account` 禁用该账户（hset enabled=false + PUBLISH 热更新 + 告警日志），幂等安全。
 
 ## 依赖与安装（必须）
 
@@ -124,7 +126,8 @@ Dockerfile 用 `uv sync --frozen --no-dev`（lock 决定依赖）。
 
 - **`get_http_headers` 必须 `include_all=True`**（auth.py）：默认版会排除 `authorization` 头——漏掉则 token 校验恒失败（gateway 注释同款坑，tests/test_auth.py 有 monkeypatch 回归）
 - **pubsub 连接死后不自动重连**（account_store.py）：except 分支必须 `aclose()` 旧的 → 重新 `pubsub()` → 重新 subscribe，否则热更新永久失效只能重启进程
-- **httpx logger 提 WARNING**（logging_config.py）：阿里云 SDK RPC 请求 URL query 含 AccessKeyId，httpx 默认 INFO 打印完整 URL 会泄漏凭证。`tests/test_logging.py` 是回归防线。这行是必守项
+- **HTTP 库 logger 提 WARNING**（logging_config.py）：阿里云 SDK RPC 请求 URL query 含 AccessKeyId，httpx/requests/urllib3/aiohttp 任一按默认级别输出请求详情都会泄漏凭证（requests 是 tea-openapi 实际底层，ConnectionError 消息带完整 URL）。4 个库 logger 统一提到 WARNING。`tests/test_logging.py` 是回归防线（断言真实 logger 级别 + 真实 logger 名发 INFO 验证被静默）。这行是必守项
+- **网络错误消息剥离 URL**（aliyun_client.py）：requests ConnectionError 消息含 `GET https://.../?AccessKeyId=<明文>&Signature=...`——`classify_error` 先判网络异常（内置 ConnectionError/TimeoutError/urllib3.HTTPError + requests.exceptions/aiohttp 延迟探测），`_call` 对 network_error 用 `_redact_network_message`（异常类型名 + 截到 "?" 之前）写入日志 error 字段 / span 描述 / AlidnsError.message 三路径；gateway-admin 探活 probe_error 同样裁剪（`_safe_probe_error`，落 Redis + 前端展示同一防线）
 - **SDK 同步走 `asyncio.to_thread`**（aliyun_client.py）：SDK 是同步 API，直接调用会阻塞 event loop
 - **`with_options` 第二个参数 runtime 必传**（aliyun_client.py）：真实 SDK 方法签名 `(request, runtime)`，缺它直接 TypeError（端到端验证实测，单测 fake 只签 request 掩盖了它）——`_call` 统一注入 `AlidnsClient.__init__` 构造的 `RuntimeOptions()`（`darabonba.runtime`），fake 签名必须保持同构
 - **pubsub listener 与 server 同 event loop**（server.py `_run`）：跨 loop 用 redis 连接直接 RuntimeError（serpapi 教训）
@@ -158,8 +161,8 @@ uv run python -m pytest tests/ -q   # 全量测试
 
 ## 已知注意事项
 
-- **network_error 兜底**（Task 7 决策，spec §7.1）：工具层只捕获 `AlidnsError`，其余异常冒泡。实测 `AlidnsClient._call` 的 `except Exception` 已把所有 SDK 异常（含网络/超时）包成 `AlidnsError`（classify_error 不匹配时落到 `api_error`），**网络错误不会 500**，但 error_type 不是精确的 `network_error`。剩余冒泡路径：Redis 连接异常（checker 内）与意外 bug——FastMCP 转 is_error 响应，client 可读。小规模 + 内网部署风险低，保持现状；若需精确分类，改 `classify_error` 加网络异常判定即可
-- **httpx WARNING 防线**：logging_config 是唯一入口，任何绕过（直接调 SDK 不经 configure_logging 的进程）会失去防线——测试进程与生产进程都走 server.py 的 `_configure_logging()`
+- **network_error 兜底**（Task 7 决策 + I1 修复，spec §7.1）：工具层只捕获 `AlidnsError`，其余异常冒泡。`AlidnsClient._call` 的 `except Exception` 已把所有 SDK 异常（含网络/超时）包成 `AlidnsError`：网络异常分类为 `network_error` 且消息剥离 URL（凭证安全），其余落到 `api_error`——网络错误不会 500。剩余冒泡路径：Redis 连接异常（checker 内）与意外 bug——FastMCP 转 is_error 响应，client 可读。小规模 + 内网部署风险低，保持现状
+- **HTTP 库 WARNING 防线**：logging_config 是唯一入口，任何绕过（直接调 SDK 不经 configure_logging 的进程）会失去防线——测试进程与生产进程都走 server.py 的 `_configure_logging()`
 
 ## 代码注释规范
 

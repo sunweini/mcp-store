@@ -12,6 +12,8 @@ from mcp.types import ToolAnnotations
 
 from dataclasses import dataclass
 
+from aliyun_client import AlidnsError
+
 # CRITICAL: 运行时模块访问（`import telemetry` 而非 `from telemetry import X`）。
 # 若用 from-import，模块加载瞬间（server.py 顶部 import tools 时，telemetry 尚
 # 未 init）会把指标绑定为 None，init_telemetry() 随后只更新 telemetry 模块自身
@@ -24,9 +26,34 @@ logger = structlog.get_logger()
 
 @dataclass
 class ToolContext:
-    """工具依赖上下文：checker（账户级鉴权）+ clients（Alidns 客户端工厂）。"""
+    """工具依赖上下文：checker（账户级鉴权）+ clients（Alidns 客户端工厂）+ store（账户存储）。
+
+    store 用于 I3 闭环：凭证失效时工具层直接禁用账户。测试可只传
+    checker/clients（store 默认 None，_map_aliyun_error 据此跳过联动）。
+    """
     checker: object
     clients: object
+    store: object | None = None
+
+
+async def map_aliyun_error(e: AlidnsError, account_id: str, ctx: ToolContext) -> dict:
+    """AlidnsError → 工具返回结构；凭证失效时联动禁用账户（I3，spec §7.1）。
+
+    为什么在工具层而非 _call：ClientFactory.get 拿到 client 后工具层真正
+    调 API 才知道凭证失效——error_type 是 _call 分类出的最终结论，这里
+    是唯一能拿到 account_id 上下文（客户端缓存键）的拦截点。
+    disable_account 幂等 + PUBLISH 热更新，失败不阻断错误返回（fail-closed）。
+    """
+    if e.error_type == "invalid_credential" and ctx.store is not None:
+        try:
+            await ctx.store.disable_account(account_id)
+        except Exception as disable_err:
+            # 禁用失败不掩盖原始错误；告警日志给出原因（凭证安全：只记
+            # account_id，不记凭证/异常内容可能含的 URL）
+            logger.error("account_disable_failed", service="aliyun-dns-mcp",
+                         account_id=account_id, reason=type(disable_err).__name__)
+    return {"status": "error", "error_type": e.error_type,
+            "message": e.message, "request_id": e.request_id}
 
 
 def _metrics_wrapper(tool_name: str):

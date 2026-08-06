@@ -31,9 +31,12 @@ def configure_logging(processors: list) -> None:
         processors=processors,
         logger_factory=structlog.stdlib.LoggerFactory(),
     )
-    # httpx 的请求日志默认 INFO 级且含完整 URL——阿里云 SDK RPC 请求的
-    # URL query 含 AccessKeyId，真实凭证会随 "HTTP Request: GET https://
-    # alidns.cn-hangzhou.aliyuncs.com/?...AccessKeyId=..." 落入日志
-    # （spec §8.1 敏感防线）。这行是必守项，不是可选项：httpx 库日志
-    # 整体提到 WARNING，行为不受影响。
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # 可能打印含凭证 URL 的请求日志的库 logger 整体提到 WARNING（spec §8.1
+    # 敏感防线）。为什么是这 4 个而不是只有 httpx：阿里云 SDK
+    # （alibabacloud-tea-openapi）底层用 requests（经 urllib3），aiohttp
+    # 也在依赖树里（fastmcp 传递依赖）；requests 的 ConnectionError 消息
+    # 带完整 URL query（AccessKeyId 明文），urllib3 有 HTTPRequest
+    # DEBUG/INFO 重放日志——任何一个按默认级别输出都会泄漏真实凭证。
+    # 这行是必守项，不是可选项：网络请求日志整体提到 WARNING，行为不受影响。
+    for lib_logger in ("httpx", "requests", "urllib3", "aiohttp"):
+        logging.getLogger(lib_logger).setLevel(logging.WARNING)

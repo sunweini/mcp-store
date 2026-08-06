@@ -3,7 +3,7 @@ import structlog
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from tools import ToolContext
+from tools import ToolContext, map_aliyun_error
 from aliyun_client import AlidnsError
 
 logger = structlog.get_logger()
@@ -22,8 +22,8 @@ async def list_domains(account_id: str, *, ctx: ToolContext | None = None) -> di
         client = ctx.clients.get(account_id)
         domains = await client.describe_domains(page_size=100, page_num=1)
     except AlidnsError as e:
-        return {"status": "error", "error_type": e.error_type,
-                "message": e.message, "request_id": e.request_id}
+        # 凭证失效（I3）等分类联动集中在统一入口（tools.map_aliyun_error）
+        return await map_aliyun_error(e, account_id, ctx)
     return {"status": "ok", "data": domains, "count": len(domains)}
 
 

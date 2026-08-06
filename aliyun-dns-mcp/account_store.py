@@ -68,6 +68,24 @@ class AccountStore:
         self._token_perms_cache.clear()
         logger.info("account_store_loaded", service="aliyun-dns-mcp", accounts=len(accounts))
 
+    async def disable_account(self, account_id: str) -> None:
+        """凭证失效时禁用账户（I3，spec §7.1 闭环）。
+
+        为什么：工具层实测发现 INVALID_CREDENTIAL 时说明该账户凭证已被
+        阿里云吊销/轮换——继续放行只会让每次调用都带错凭证，且写操作
+        （add/update/delete_record）会带着失效凭证失败但用户无法察觉原因。
+        幂等：已禁用再次调用无害；PUBLISH 触发热更新让本进程与其他副本
+        同步感知。凭证安全：日志只记 account_id，不记任何凭证内容。
+        """
+        await self._redis.hset(f"aliyndns:accounts:{account_id}", "enabled", "false")
+        # listener 重载后 _accounts 内存缓存同步生效（异步，本方法返回时
+        # 工具层已 fail-closed 返回错误，不依赖缓存立即更新）
+        await self._redis.publish(CHANGE_CHANNEL, json.dumps(
+            {"action": "disable", "key": f"aliyndns:accounts:{account_id}"}))
+        logger.error("aliyun_account_auto_disabled", service="aliyun-dns-mcp",
+                     account_id=account_id,
+                     reason="invalid_credential detected by API call (spec §7.1)")
+
     @staticmethod
     def _normalize_creds(data: dict) -> dict:
         return {
@@ -103,7 +121,10 @@ class AccountStore:
         for account_id, payload in raw.items():
             try:
                 p = json.loads(payload)
-                perms[account_id] = {"read": bool(p.get("read")), "write": bool(p.get("write"))}
+                # 必须 `is True` 而不是 bool()：JSON 反序列化后真值是布尔 True，
+                # 但 Redis 可被手写 "false" 字符串（gateway-admin 之外的写入者），
+                # bool("false")==True 会把拒绝权限反转成放行（M1 审查发现）
+                perms[account_id] = {"read": p.get("read") is True, "write": p.get("write") is True}
             except json.JSONDecodeError:
                 logger.warning("token_perms_corrupt", service="aliyun-dns-mcp",
                                token_id=token_id, account_id=account_id)

@@ -3,7 +3,7 @@ import structlog
 from fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from tools import ToolContext
+from tools import ToolContext, map_aliyun_error
 from aliyun_client import AlidnsError
 
 logger = structlog.get_logger()
@@ -22,8 +22,7 @@ async def list_records(account_id: str, domain_name: str, *, ctx: ToolContext | 
         client = ctx.clients.get(account_id)
         records = await client.describe_domain_records(domain_name, page_size=100, page_num=1)
     except AlidnsError as e:
-        return {"status": "error", "error_type": e.error_type,
-                "message": e.message, "request_id": e.request_id}
+        return await map_aliyun_error(e, account_id, ctx)
     return {"status": "ok", "data": records, "count": len(records)}
 
 
@@ -46,8 +45,7 @@ async def add_record(account_id: str, domain_name: str, rr: str, type: str, valu
         record_id = await client.add_domain_record(
             domain_name, rr, type, value, ttl=ttl, priority=priority)
     except AlidnsError as e:
-        return {"status": "error", "error_type": e.error_type,
-                "message": e.message, "request_id": e.request_id}
+        return await map_aliyun_error(e, account_id, ctx)
     logger.info("record_added", service="aliyun-dns-mcp", account_id=account_id,
                 domain_name=domain_name, rr=rr, type=type)
     return {"status": "ok", "data": {"record_id": record_id}}
@@ -76,8 +74,7 @@ async def update_record(account_id: str, record_id: str,
         await client.update_domain_record(record_id, rr=rr, type=type, value=value,
                                           ttl=ttl, priority=priority)
     except AlidnsError as e:
-        return {"status": "error", "error_type": e.error_type,
-                "message": e.message, "request_id": e.request_id}
+        return await map_aliyun_error(e, account_id, ctx)
     logger.info("record_updated", service="aliyun-dns-mcp", account_id=account_id, record_id=record_id)
     return {"status": "ok", "data": {"record_id": record_id}}
 
@@ -95,8 +92,7 @@ async def delete_record(account_id: str, record_id: str, *, ctx: ToolContext | N
         client = ctx.clients.get(account_id)
         await client.delete_domain_record(record_id)
     except AlidnsError as e:
-        return {"status": "error", "error_type": e.error_type,
-                "message": e.message, "request_id": e.request_id}
+        return await map_aliyun_error(e, account_id, ctx)
     logger.info("record_deleted", service="aliyun-dns-mcp", account_id=account_id, record_id=record_id)
     return {"status": "ok", "data": {"record_id": record_id}}
 
