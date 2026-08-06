@@ -23,6 +23,9 @@ dependencies = [
     "prometheus-client",
     "alibabacloud-alidns20150109",
     "alibabacloud-tea-openapi",
+    # darabonba.runtime（RuntimeOptions，with_options 必传参数）目前是
+    # tea-openapi 的传递依赖——显式声明防上游改依赖树导致构建漂移
+    "darabonba-core",
 ]
 
 [project.optional-dependencies]

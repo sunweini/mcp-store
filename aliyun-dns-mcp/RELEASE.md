@@ -37,11 +37,15 @@ curl -s -X POST http://127.0.0.1:9054/mcp \
 
 ### 3. 构建 & 发布
 
-本 MCP 为内部 server（不发布 PyPI），部署走 Docker 镜像：
+本 MCP 为内部 server（不发布 PyPI），部署走仓库 compose（无需自建 registry）：
 
 ```bash
-docker build -t aliyun-dns-mcp:<version> .
-docker push <registry>/aliyun-dns-mcp:<version>
+# 本地全量部署（deploy.sh 先建 mcp-base 再 build 全部服务镜像，含本服务）
+cd deploy && bash deploy.sh
+
+# 或仅重构建本服务并重启
+docker compose -f deploy/docker-compose.yml build aliyun-dns-mcp
+docker compose -f deploy/docker-compose.yml up -d aliyun-dns-mcp
 ```
 
 ### 4. 发布后检查
@@ -71,36 +75,36 @@ UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ uv lock
 
 ### Docker 部署
 
+Dockerfile 已在仓库内（`aliyun-dns-mcp/Dockerfile`），与全仓 MCP 同模式——继承 `mcp-base` 基础镜像（python3.12-slim + uv + 阿里云 apt/pypi 镜像源，见 `deploy/Dockerfile.base`）：
+
 ```dockerfile
-FROM python:3.12-slim
-# healthcheck 用 curl（slim 镜像无 curl，见「compose 示例」）
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
+FROM mcp-base:latest
 WORKDIR /app
-COPY pyproject.toml uv.lock ./
+# uv.lock 与 pyproject 一致（--frozen 保证可复现构建）
+COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev
-
-COPY server.py aliyun_client.py auth.py account_store.py logging_config.py telemetry.py ./
-COPY tools/ ./tools/
+COPY . ./
+ENV MCP_HOST=0.0.0.0
 CMD ["uv", "run", "python", "server.py"]
 ```
 
+> 不要自建 `FROM python:3.12-slim` + 官方 pypi 源的 Dockerfile——生产网络无法访问 files.pythonhosted.org，必须在 mcp-base 上构建（apt/pypi 均走阿里云镜像）。healthcheck 用 curl 而非容器内 curl 安装（slim 无 curl，见下）。
+
 ### compose（并入 gateway compose）
+
+`deploy/docker-compose.yml` 已含本服务（`build: ../aliyun-dns-mcp`，容器内 9054 + `9469:9464` metrics，无凭证 env——账户 AccessKey 由 admin UI「阿里云 DNS」页写入 Redis）。本地/自建 compose 的最小等价示例：
 
 ```yaml
 aliyun-dns-mcp:
-  image: <registry>/aliyun-dns-mcp:<version>
+  build: ../aliyun-dns-mcp     # 与仓库 compose 一致，不要用 image: <registry>（无自建 registry 场景）
+  ports:
+    - "9469:9464"              # metrics 宿主映射；MCP 端口 9054 不映射宿主
   environment:
     REDIS_URL: redis://redis:6379/0
-    MCP_PORT: "9054"            # 容器内固定；如需宿主映射（不建议），改 ports
-    PROMETHEUS_PORT: "9464"     # 容器内固定
+    MCP_PORT: "9054"
+    PROMETHEUS_PORT: "9464"
     LOG_FORMAT: json
-    OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
-  networks: [gateway-net]       # 与 gateway-proxy 同网，供其内网访问
   depends_on: [redis]
-  # 如确需宿主访问 metrics，加 ports（错开宿主端口）：
-  # ports: ["9469:9464"]
   healthcheck:
     test: ["CMD", "curl", "-f", "-X", "POST", "http://127.0.0.1:9054/mcp",
            "-H", "MCP-Protocol-Version: 2026-07-28", "-H", "Mcp-Method: tools/list",
@@ -110,11 +114,13 @@ aliyun-dns-mcp:
     retries: 3
 ```
 
+> healthcheck 依赖 curl：`deploy/Dockerfile.base` 已装 curl，若脱离 mcp-base 自建镜像需自行安装。
+
 ### 部署步骤（10.33.17.72）
 
-1. 本地：`UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ uv lock` 重建 lock，`docker build -t aliyun-dns-mcp:<version> .`，push 到私有 registry
-2. 服务器：拉镜像，更新 compose 中 version
-3. gateway-admin → Servers：注册 `aliyun-dns-mcp`（URL `http://aliyun-dns-mcp:9054/mcp`）
+1. 本地：`UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ uv lock` 重建 lock，`cd deploy && bash deploy.sh`（自动先建 mcp-base 再 build 全部服务镜像，含 aliyun-dns-mcp）
+2. 服务器：`docker compose -f deploy/docker-compose.yml up -d aliyun-dns-mcp`（代码更新后 `build aliyun-dns-mcp` 再 up）
+3. gateway-admin → Servers：注册 `aliyun-dns-mcp`（URL `http://aliyun-dns-mcp:9054/mcp`，init.sh 已幂等注册）
 4. gateway-admin → Tokens：为 token 勾选 `aliyun-dns-mcp` read/write
 5. gateway-admin → 账户授权：为 token 配置账户级 read/write（Redis 写 + `aliyndns:changed` pubsub 热更新，MCP 无需重启）
 

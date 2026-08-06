@@ -247,6 +247,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "alibabacloud-alidns20150109" },
     { name = "alibabacloud-tea-openapi" },
+    { name = "darabonba-core" },
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "opentelemetry-api" },
@@ -270,6 +271,7 @@ dev = [
 requires-dist = [
     { name = "alibabacloud-alidns20150109" },
     { name = "alibabacloud-tea-openapi" },
+    { name = "darabonba-core" },
     { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.20" },
     { name = "fastmcp", specifier = "==4.0.0b1" },
     { name = "httpx", specifier = ">=0.27,<1.0" },
