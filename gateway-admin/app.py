@@ -68,12 +68,14 @@ async def health():
 
 
 # Routers
-from api import servers, tokens, dashboard, keys, calls
+from api import servers, tokens, dashboard, keys, calls, aliyun_accounts, aliyun_perms
 app.include_router(servers.router)
 app.include_router(tokens.router)
 app.include_router(dashboard.router)
 app.include_router(keys.router)
 app.include_router(calls.router)
+app.include_router(aliyun_accounts.router)
+app.include_router(aliyun_perms.router)
 
 # Serve Vue 3 SPA if dist exists (Plan C builds it).
 # 不能用 StaticFiles 挂 "/"：它只对根路径返回 index.html，深层路由

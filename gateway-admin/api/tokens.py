@@ -97,4 +97,7 @@ async def delete_token(token_id: str, _: str = Depends(require_admin)):
         raise HTTPException(status_code=404, detail="token not found")
     await r.delete(f"tokens:{token_hash}")
     await r.delete(f"token_id:{token_id}")
+    # 清理 aliyun-dns-mcp 账户授权映射，避免僵尸授权残留——MCP 侧有
+    # 防御（账户不在 store 即拒绝），但清理保持数据整洁（spec §6.2）
+    await r.delete(f"aliyndns:token_accounts:{token_id}")
     return None
