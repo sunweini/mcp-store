@@ -118,6 +118,51 @@ async def test_network_error_sanitized_in_log_and_span(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
+async def test_network_error_span_event_uses_sanitized_message(monkeypatch):
+    """I1 残余回归：span exception event 不得含 URL query（AccessKeyId 明文）。
+
+    为什么单独抓 span：record_exception 会把 str(exc) 全文写进 event 的
+    exception.message（且 stacktrace 首行同样含完整 URL），console span
+    exporter 直接打 stdout——日志防线的最后一块拼图。
+    """
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    # aliyun_client 模块级 tracer 在 import 瞬间绑定默认 no-op provider，
+    # 仅 set_tracer_provider 无效——必须整体替换模块 tracer 才能捕获 span
+    monkeypatch.setattr("aliyun_client.tracer", provider.get_tracer("test"))
+
+    url_msg = ("HTTPSConnectionPool(host='alidns.cn-hangzhou.aliyuncs.com', port=443): "
+               "Max retries exceeded ...: GET https://alidns.cn-hangzhou.aliyuncs.com/?"
+               "AccessKeyId=LTAI5t-demo-secret-value&Signature=abc&version=2015-01-09")
+    sdk = FakeSDKClient(script={"domains_error": ConnectionError(url_msg)})
+    client = _make_client(monkeypatch, sdk)
+    with pytest.raises(AlidnsError):
+        await client.describe_domains()
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.name == "aliyun_client.describe_domains"
+    events = [e for e in span.events if e.name == "exception"]
+    assert events, "网络错误必须产生 exception span event"
+    # 事件属性与 status 描述全链路无凭证、无 URL query（"?" 是 query 分界）
+    for ev in events:
+        assert "exception.stacktrace" not in ev.attributes  # add_event 不附 traceback
+        for attr_value in ev.attributes.values():
+            assert "LTAI5t-demo-secret-value" not in str(attr_value)
+            assert "AccessKeyId" not in str(attr_value)
+            assert "?" not in str(attr_value)
+    assert "LTAI5t-demo-secret-value" not in span.status.description
+    assert "AccessKeyId" not in span.status.description
+    assert "?" not in span.status.description
+
+
+@pytest.mark.asyncio
 async def test_throttled_retries_once_then_succeeds(monkeypatch):
     """I2 回归（spec §7.1）：首次 throttled → 退避重试 1 次 → 成功。"""
     # 缩短退避：单测不真等 1s（重试语义与 sleep 时长无关）

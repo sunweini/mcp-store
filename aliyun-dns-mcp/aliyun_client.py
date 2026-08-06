@@ -139,7 +139,13 @@ class AlidnsClient:
             # 注入，各工具方法不重复传
             return fn(request, self._runtime)
 
-        with tracer.start_as_current_span(span_name) as span:
+        # record_exception/set_status_on_exception=False：OTel SDK 默认在
+        # with 块未捕获异常退出时自动 record_exception——自动事件的 stacktrace
+        # 含 `raise ... from exc` 原始异常链（ConnectionError 消息带完整 URL
+        # query），绕过剥离防线。本模块手动记录事件与状态（下方异常路径），
+        # 关闭自动机制保证凭证防线唯一入口（I1 残余）。
+        with tracer.start_as_current_span(span_name, record_exception=False,
+                                          set_status_on_exception=False) as span:
             span.set_attribute("operation.type", "aliyun_api")
             start = time.monotonic()
             try:
@@ -157,10 +163,20 @@ class AlidnsClient:
                 dep_errors = telemetry.DEPENDENCY_ERRORS_TOTAL
                 if dep_errors:
                     dep_errors.add(1, attributes={"dependency": "alidns_api", "error_type": err_type})
-                span.record_exception(exc)
                 # network_error 消息可能含完整 URL query（AccessKeyId 明文）：
                 # span 描述/log/工具响应共用剥离后的安全消息（spec §8.1）
                 safe_msg = _redact_network_message(exc) if err_type == "network_error" else str(exc)
+                if err_type == "network_error":
+                    # 不能用 record_exception：OTel 会把 str(exc) 全文写进 span
+                    # event 的 exception.message，且 stacktrace 首行同样含完整
+                    # URL（明文落 stdout console exporter）——手动 add_event 只
+                    # 写剥离后的安全消息，零凭证（I1 残余）
+                    span.add_event("exception", {
+                        "exception.type": type(exc).__name__,
+                        "exception.message": safe_msg,
+                    })
+                else:
+                    span.record_exception(exc)
                 span.set_status(trace.Status(trace.StatusCode.ERROR, safe_msg))
                 logger.error("aliyun_api_error", service="aliyun-dns-mcp",
                              api=api_name, error_type=err_type, error=safe_msg)
