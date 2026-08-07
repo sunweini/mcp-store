@@ -312,7 +312,11 @@ class KeyPool:
                 rec["cooldown_until"] = time.strftime(
                     "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + seconds))
             rec["last_error"] = kind.value
-            await self._write(key_id, rec)
+        # 写回放锁外（与 on_success 的 pipeline 外置同构）：_write 是 Redis
+        # 网络 IO——锁绝不包外呼 await（spec 3.2 硬约束）。记账（归还 + 状态
+        # 变更）已在锁内完成；持久化无需持锁，写回失败后果与旧实现一致
+        # （下一次 reload 覆盖）
+        await self._write(key_id, rec)
 
     def health_snapshot(self) -> dict:
         """池健康摘要（spec KeyPool 设计节）——配额指标的数据源。

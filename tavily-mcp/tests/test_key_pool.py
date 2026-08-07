@@ -1,4 +1,5 @@
 """KeyPool unit tests — rotation, failover, cooldown, hot reload."""
+import asyncio
 import json
 import time
 from unittest.mock import AsyncMock
@@ -201,6 +202,63 @@ async def test_borrow_after_reload_survives(pool):
     # 未归还的 in-flight 不泄漏成负数：再借一次 k1（无竞争时按 remaining 最高）
     r2 = await pool_.next_key()
     assert r2["key_id"] == "k1"
+
+
+async def test_concurrent_borrow_and_reload_and_success(pool):
+    """并发压测锁的竞态保护（评审 Finding 3）：reload 换 _records dict 的
+    瞬间窗口与借用/记账并发。
+
+    asyncio.gather 并发 N 轮 [next_key → on_success] 与 M 次 reload：
+    - 不炸（无 KeyError/锁序死锁/零除）
+    - 数据一致：借用数恒 ≤ key 数（并发借用分散），总借用与总归还
+      （success）逐 key 收支平衡——in-flight 最终清零、无泄漏
+    - on_error 在锁内完成记账、写回在锁外（Finding 1 修复），此并发
+      下写回落库不丢（reload 覆盖写入属预期，断言以池内状态为准）
+
+    未并发验证前（顺序版 test_borrow_after_reload_survives）只能证明
+    reload 后归还不炸；锁的互斥是否真的串行化了「换 dict」与「借/还」
+    两段临界区，只有并发下才可能暴露。
+    """
+    pool_, fake_redis = pool
+    # 平局（并发借用只能靠 in-flight 分散）：tie 必须写进 FakeRedis 备份
+    # 存储而非直接改 pool._records——reload 从备份存储重建 dict，直接改
+    # 会被 reload 回退成 900/800，100 分差距 1 次借用盖不过，测不出分散
+    tie_remaining = 200  # ratio=0.2（quota 1000）→ 状态恒 active 不断言漂移
+    for key_id, payload in fake_redis._records.items():
+        if isinstance(payload, str):
+            rec = json.loads(payload)
+            rec["remaining"] = tie_remaining
+            fake_redis._records[key_id] = json.dumps(rec, ensure_ascii=False)
+    await pool_.reload()
+    n_borrows = 20
+
+    async def borrow_and_return(i):
+        rec = await pool_.next_key()
+        assert rec is not None
+        # 模拟真实 API 调用窗口（真实代码在借出后 await 外呼 IO 自然让出
+        # 事件循环）：无此行时 next_key/on_success 全程不挂起，gather 顺序
+        # 执行、每次借用都在下次挑选前归还——测不出并发，只会全选 k1
+        await asyncio.sleep(0)
+        await pool_.on_success(rec["key_id"], remaining=tie_remaining)
+        return rec["key_id"]
+
+    async def reload_loop():
+        # reload 与 borrow 并发交错：hgetall 在锁外、整表替换在锁内，
+        # 反复换 dict 制造竞态窗口（sleep(0) 让 reload 与外呼窗口交错）
+        for _ in range(5):
+            await pool_.reload()
+            await asyncio.sleep(0)
+
+    used = await asyncio.gather(*([borrow_and_return(i) for i in range(n_borrows)]
+                                  + [reload_loop()]))
+    ids = used[:n_borrows]
+    assert len(set(ids)) >= 2  # 并发借用分散到不同 key（借用语义生效）
+    # 收支平衡：20 次借用全部归还、in-flight 清零，无借用泄漏
+    assert sum(pool_._in_flight.values()) == 0
+    # 并发下锁正确串行化记账——状态一致：remaining 未被写坏
+    for rec in pool_._records.values():
+        assert rec["status"] == "active"
+        assert rec["remaining"] == tie_remaining
 
 
 async def test_release_returns_borrow_without_writing_state(pool):

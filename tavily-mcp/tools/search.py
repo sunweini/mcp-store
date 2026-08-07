@@ -145,6 +145,11 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
         响应自带 remaining 优先（新鲜、零成本，见 _once）；缺失时走
         周期 usage() 兜底（_usage_refresh_interval_for 控制请求比）。
         记账统一在此执行，刷新只回传 remaining——避免双写。
+
+        注意（Task 6 借用语义）：_maybe_refresh_usage 的 GET /usage 外呼
+        发生在 on_success 归还借用之前——usage 刷新在借出窗口内属预期
+        （最坏 5s 间隔一次、延迟 in-flight 占位，无正确性影响；若把归还
+        提前到刷新前则需在 KeyPool 加「借回」，复杂度不值）。
         """
         if remaining is None:
             remaining = await _maybe_refresh_usage(
