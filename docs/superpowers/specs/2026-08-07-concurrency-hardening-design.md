@@ -55,7 +55,8 @@ gateway-admin（消费者，lifespan 后台 task）
 ```
 
 - Stream：`audit:calls`（新流，替代 `audit:failures` 10000 上限的旧流），MAXLEN 50000（approximate），消费者组 `calls-consumers`，消费者名 = 容器 hostname
-- proxy 删除 `db.py`/`record_call`（不再直连 MySQL）
+- **middleware.py 合并**：现有 `record_call_failure`（Redis 流）+ `record_call_audit`（MySQL）两个审计函数合并为**一次 XADD**（成功/失败同一入口，message/journey 按 status 区分）——实现者须同时删这两个函数及其调用点，不能只删 audit.py
+- proxy 删除 `db.py`（唯一调用方是 audit.py，已核实）
 - 失败行 message/journey 完整（前端失败面板依赖）；成功行留空（现状等价）
 - 落库延迟 <1s（XREADGROUP block 1s + batch 100）
 
@@ -66,8 +67,9 @@ gateway-admin（消费者，lifespan 后台 task）
 - Redis 瞬时故障 → 缓存继续放行，防 403 风暴
 - 命中缓存免 Redis，未命中走 Redis（verify_token 语义不变）
 - **缓存失效必须新增通道**：admin tokens.py 当前 create/delete **不 publish 任何通知**（已核实，tokens.py 仅 hset/set）。删除 token 后缓存仍可用 60s = 吊销延迟（安全漏洞）。
-  - **新增**：admin `tokens.py` 在 create/delete 时 publish `token:changed`（payload 含 token_hash）
+  - **新增**：admin `tokens.py` 在 create/delete 时 publish `token:changed`（payload 含 token_hash — delete 接口只有 token_id，须先查 `token_id:{token_id}` 拿 token_hash，tokens.py:95 已有此查询）
   - **新增**：proxy `watch_changes` 扩订阅 `token:changed` → 失效对应缓存项
+  - **订阅实现**：复用现有 `watch_changes` 的**同一条** pubsub 连接订阅双频道（`server:changed` + `token:changed`，redis-py 支持多频道 subscribe），listen 循环按 `msg["channel"]` 分流处理 — 自愈逻辑只维护一个连接，避免第二条 pubsub 连接带来双倍断线面
   - 权限变更（update 权限）同走 `token:changed`，保证吊销与变更即时生效
 
 ### 2.2 连接池泄漏修复（registry.py TODO）
@@ -77,10 +79,15 @@ gateway-admin（消费者，lifespan 后台 task）
 - 断线重建订阅（aclose → pubsub() → subscribe），与搜索 MCP `_resubscribe` 对齐
 
 ### 2.4 后端背压
-- per-backend semaphore（默认 100）+ 调用总超时（默认 30s）
+- per-backend semaphore（默认 100），排队请求计入等待时间（R6：latency 含排队，p95 反映真实端到端）
+- 总超时见 2.5（默认 90s，非 30s）
 
 ### 2.5 调用总超时
 - `call_next` 包 `asyncio.wait_for`，超时 → ToolError(TimeoutError)，计入审计
+- **默认值必须 ≥ 后端最长任务超时**：tavily crawl/research 是 60s（LONG_TASK_TIMEOUT，已核实）——proxy 总超时默认 30s 会杀死长任务，违反"不影响现有功能"
+- 修正：总超时默认 **90s**（后端最长 60s + 余量），支持 per-server 覆盖（`servers:{name}` hash 加 `call_timeout` 字段，admin 可配）
+- 配置缺失时回退默认 90s
+- **admin 侧需改动**：`ServerCreate`/`ServerUpdate` model 加 `call_timeout: float | None = None` 字段（现有仅 url/description，已核实；None → proxy 用默认 90s，向后兼容，不影响现有注册流程）
 
 ### 2.6 XADD 失败兜底
 - 日志 + 指标（audit_dropped_total），不重试
@@ -91,8 +98,9 @@ gateway-admin（消费者，lifespan 后台 task）
 - 全局单例 `httpx.AsyncClient`（连接池，默认 limits 100）
 - key 请求级 `headers={"Authorization": f"Bearer {key}"}`，不绑 client
 - 共享 client **禁止设默认 Authorization 头**（R5：防 key 串用）
-- `TavilyClient` 改薄封装：持有共享 client + 每请求传 key；公开方法签名不变
-- `_call_with_pool` 的 `factory(key, timeout)` → `factory(timeout)`，测试 FakeClient 注入不变
+- `TavilyClient` 改薄封装：内部用共享 client，**公开方法签名不变**（`search(params)` 等），每请求传 key 头 + 每请求 timeout（httpx 支持 per-request timeout）
+- **`factory(key, timeout)` 签名保持不变**（仅内部不再新建 AsyncClient）——改签名会波及全部测试 FakeClient，违反"不影响调用方式"约束
+- `_call_with_pool` 仅内部实现变更，测试 FakeClient 注入不变
 
 ### 3.2 KeyPool 借用语义
 - in-flight 计数：选择时临时递减 remaining，完成归还
@@ -123,7 +131,9 @@ gateway-admin（消费者，lifespan 后台 task）
 
 ### 测试
 - 单测：token 缓存/失效/Redis 降级；XADD 成败；semaphore 排队；超时 ToolError；unmount 显式关闭；消费者 XREADGROUP→executemany→XACK；batch 失败→死信；KeyPool 借用分散；pipeline；退避
-- 压测：httpx 并发打 gateway /mcp，测 100/500/1000 并发；断言审计落库 <2s、无 403 风暴、无单 key 打爆
+- 单测可行性（已核实）：fakeredis 支持 XADD/XGROUP_CREATE/XREADGROUP/XACK 全部 stream 操作，消费者逻辑可纯内存测试，无需真 Redis
+- 压测：httpx 并发打 gateway /mcp，测 100/500/1000 并发；断言 stream 写入无失败、无 403 风暴（Redis 抖时不崩）、无单 key 打爆（429 率不飙升）
+- **端到端审计延迟验证需真环境**：本地压测无 admin 消费者进程，"落库 <2s"断言改为二阶段——(a) 本地压测验证 XADD 成功率与 proxy 延迟（MySQL 已移出路径，proxy 延迟不依赖存储）；(b) 部署生产后验证 stream→MySQL 落库延迟（消费者真实运行）
 - 回归：现有 pytest 全绿 + smoke_test + admin UI 手工验
 
 ### 部署与回滚（生产 10.33.17.72）
