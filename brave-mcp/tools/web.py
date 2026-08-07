@@ -8,7 +8,16 @@ Error/failover strategy (per spec 错误处理节):
 - 两个工具都是幂等 GET 查询,失败后换下一 key 重试一次
 - client_factory 注入: 默认构造真实 BraveClient(5s 超时),测试注入
   FakeClient 驱动公开方法,不依赖私有 _get
+
+Concurrency (spec C2/C3, Task 6):
+- 借用语义：next_key 扣减 in-flight 防并发扎堆同一 key（429 风暴）；
+  成功/可归类失败由 on_success/on_error 归还，瞬时错误（不记账路径）
+  显式 release() 归还——借用必须对称，否则超时每次泄漏 +1
+- 429 退避：幂等操作 429 时 sleep(0.5s) 再换 key（冷却 key 已被
+  next_key 排除，不立即重打）
+- per-endpoint semaphore：两工具都是轻查询（≤20）
 """
+import asyncio
 from typing import Callable, Optional
 
 from fastmcp import FastMCP
@@ -16,6 +25,7 @@ from mcp.types import ToolAnnotations
 import structlog
 
 from brave_client import BraveClient, classify_error
+from key_pool import ErrorKind
 
 logger = structlog.get_logger()
 
@@ -32,6 +42,24 @@ TOOLS: dict[str, dict] = {
 # client_factory(key, timeout) -> BraveClient 兼容对象(公开方法
 # web_search/local_search)。默认造真实 client;测试注入 FakeClient。
 ClientFactory = Callable[[str, float], object]
+
+# ── per-endpoint 并发上限（spec C2，Task 6）────────────────────────
+# 两工具都是幂等轻查询；上限 20 防并发打爆外部 API（主要防压测扎堆）。
+# 模块级 dict 惰性建 semaphore（工具层单例）。
+_RATE_LIMIT_BACKOFF = 0.5   # 429 重试退避起点（秒）
+_TOOL_CONCURRENCY = {
+    "brave_web_search": 20,
+    "brave_local_search": 20,
+}
+_semaphores: dict[str, asyncio.Semaphore] = {}
+
+
+def _get_semaphore(tool_name: str) -> asyncio.Semaphore:
+    sem = _semaphores.get(tool_name)
+    if sem is None:
+        sem = asyncio.Semaphore(_TOOL_CONCURRENCY[tool_name])
+        _semaphores[tool_name] = sem
+    return sem
 
 
 def _default_factory(key: str, timeout: float) -> BraveClient:
@@ -58,6 +86,7 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
     endpoint = cfg["endpoint"]
     retryable = cfg["retryable"]
     factory = client_factory or _default_factory
+    sem = _get_semaphore(tool_name)
 
     async def _once(rec: dict) -> tuple:
         """Single attempt: returns (resp, exc); resp None on failure.
@@ -84,32 +113,46 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
                 except Exception:
                     pass
 
-    key_rec = await pool.next_key()
-    if key_rec is None:
-        return {"status": "error",
-                "message": "brave 该源所有 API key 不可用，请在前台检查 key 池状态"}
-    resp, exc = await _once(key_rec)
-    if resp is not None:
-        await pool.on_success(key_rec["key_id"])
-        return {"status": "ok", "data": resp}
-    kind = classify_error(exc, getattr(exc, "status_code", None))
-    # 仅可归类错误才写 key 状态（实测超时/连接错误 classify_error 返回
-    # None——瞬时问题,key 本身有效,写 EXHAUSTED 会把好 key 永久剔除）
-    if kind:
-        await pool.on_error(key_rec["key_id"], kind)
-    if retryable:
-        # 换下一 key 重试一次（幂等操作才允许）；next_key 已排除刚标记
-        # 失败的 key，None 或同 key 均表示无可换 key
-        key_rec2 = await pool.next_key()
-        if key_rec2 and key_rec2["key_id"] != key_rec["key_id"]:
-            resp2, exc2 = await _once(key_rec2)
-            if resp2 is not None:
-                await pool.on_success(key_rec2["key_id"])
-                return {"status": "ok", "data": resp2}
-            kind2 = classify_error(exc2, getattr(exc2, "status_code", None))
-            if kind2:
-                await pool.on_error(key_rec2["key_id"], kind2)
-    return {"status": "error", "message": str(exc)}
+    # semaphore 防并发打爆外部 API（spec C2）：acquire 在取 key 之前——
+    # 超过并发上限的请求排队等 semaphore 而非挤占 key 池借用
+    async with sem:
+        key_rec = await pool.next_key()
+        if key_rec is None:
+            return {"status": "error",
+                    "message": "brave 该源所有 API key 不可用，请在前台检查 key 池状态"}
+        resp, exc = await _once(key_rec)
+        if resp is not None:
+            await pool.on_success(key_rec["key_id"])
+            return {"status": "ok", "data": resp}
+        kind = classify_error(exc, getattr(exc, "status_code", None))
+        # 仅可归类错误才写 key 状态（实测超时/连接错误 classify_error 返回
+        # None——瞬时问题,key 本身有效,写 EXHAUSTED 会把好 key 永久剔除）
+        if kind:
+            await pool.on_error(key_rec["key_id"], kind)
+        else:
+            # 瞬时错误不记账但必须归还借用——否则每次超时 in-flight +1
+            # 永不清零，该 key 被无限压低（借用对称性，Task 6）
+            await pool.release(key_rec["key_id"])
+        if retryable:
+            # 429/冷却：指数退避再重试（0.5s 起步，spec C3），不立即重打
+            # 冷却 key——next_key 已排除 cooldown key，刚标记的 key 不会
+            # 被选回；退避给外部 API 恢复窗口
+            if kind == ErrorKind.RATE_LIMIT:
+                await asyncio.sleep(_RATE_LIMIT_BACKOFF)
+            # 换下一 key 重试一次（幂等操作才允许）；next_key 已排除刚标记
+            # 失败的 key，None 或同 key 均表示无可换 key
+            key_rec2 = await pool.next_key()
+            if key_rec2 and key_rec2["key_id"] != key_rec["key_id"]:
+                resp2, exc2 = await _once(key_rec2)
+                if resp2 is not None:
+                    await pool.on_success(key_rec2["key_id"])
+                    return {"status": "ok", "data": resp2}
+                kind2 = classify_error(exc2, getattr(exc2, "status_code", None))
+                if kind2:
+                    await pool.on_error(key_rec2["key_id"], kind2)
+                else:
+                    await pool.release(key_rec2["key_id"])
+        return {"status": "error", "message": str(exc)}
 
 
 async def brave_web_search(

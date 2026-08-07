@@ -64,6 +64,15 @@ class KeyPool:
         self._records: dict[str, dict] = {}
         self._key_hash: dict[str, str] = {}  # key → key_id (decorrelation)
         self._pool_key = f"search:keys:{provider}"
+        # ── 并发借用语义（spec 3.2）──────────────────────────────
+        # 改造前 next_key 只挑选不标记——并发请求全选 remaining 最高的
+        # key → 429 风暴。借用：选择时临时扣减 in-flight 计数（后续请求
+        # 自然分散到别的 key），完成/失败后 on_success/on_error 归还。
+        # 单实例内 asyncio.Lock 足够；多实例需 Redis 原子借出（Lua），
+        # 留作演进。锁只包选择瞬间/记账瞬间与 reload 整表替换——绝不包
+        # 外呼 await（工具层在 next_key 返回后才调 API，锁天然不覆盖）
+        self._in_flight: dict[str, int] = {}
+        self._pool_lock = asyncio.Lock()
         # 持有监听任务引用防 GC（3.12 对无引用任务有销毁告警）；
         # done_callback 记录异常退出，重启策略由 Task 2 server 层决定
         self._listen_task: asyncio.Task | None = None
@@ -134,6 +143,10 @@ class KeyPool:
             pass
 
     async def reload(self) -> None:
+        # 锁内整表替换：防热更新与 in-flight 记账竞态（spec 3.2）——
+        # 不加锁时 reload 换新 _records dict，持旧 rec 的 on_success 写回
+        # 会作用在新 dict 的旧键上且字段更新丢失。hgetall 是网络 IO，锁
+        # 只包替换瞬间（hgetall 放在锁外，不因加锁阻塞挑选/记账）
         raw = await self._redis.hgetall(self._pool_key)
         records: dict[str, dict] = {}
         key_hash: dict[str, str] = {}
@@ -148,8 +161,9 @@ class KeyPool:
             rec["key_id"] = key_id
             records[key_id] = rec
             key_hash[rec["key"]] = key_id
-        self._records = records
-        self._key_hash = key_hash
+        async with self._pool_lock:
+            self._records = records
+            self._key_hash = key_hash
         logger.info("key_pool_reloaded",
                     service="brave-mcp",
                     provider=self.provider, key_count=len(records))
@@ -158,11 +172,30 @@ class KeyPool:
         record_quota_metrics(self.provider, self.health_snapshot())
 
     async def next_key(self) -> dict | None:
-        """Pick the best key. Priority:
+        """Pick the best key, marking it borrowed (in-flight +1).
+
+        Priority:
         1. enabled, status != invalid/exhausted, cooldown expired
         2. skip low_quota unless no healthy key remains (fallback)
-        3. highest remaining (quota-aware), tie by insertion order
+        3. highest effective remaining (remaining − in-flight), tie by
+           insertion order
         Returns the full record dict, or None if pool empty.
+        借用语义：锁内扣减 in-flight，后续并发选择自然分散到别的 key
+        （防 429 风暴——只挑不标记时全打 remaining 最高者）。锁只包选择
+        瞬间，不覆盖返回后的 API 外呼；归还由 on_success/on_error 完成。
+        """
+        async with self._pool_lock:
+            rec = self._pick_candidate()
+            if rec is None:
+                return None
+            self._in_flight[rec["key_id"]] = self._in_flight.get(rec["key_id"], 0) + 1
+            return rec
+
+    def _pick_candidate(self) -> dict | None:
+        """Best-key selection（在 _pool_lock 内调用，借用与挑选原子）。
+
+        与旧 next_key 的区别仅在排序键：effective remaining = remaining −
+        in-flight——借用中的 key 选择时自然退后，并发请求分散到不同 key。
         """
         now = time.time()
         healthy, low_quota, unavailable = [], [], []
@@ -196,60 +229,90 @@ class KeyPool:
         candidates = healthy if healthy else low_quota
         if not candidates:
             return None
-        candidates.sort(key=lambda r: r.get("remaining") or 0, reverse=True)
+        candidates.sort(
+            key=lambda r: (r.get("remaining") or 0) - self._in_flight.get(r["key_id"], 0),
+            reverse=True,
+        )
         return candidates[0]
 
     async def on_success(self, key_id: str, remaining: int | None = None) -> None:
-        rec = self._records.get(key_id)
-        if rec is None:
-            return
-        rec["cooldown_until"] = None
-        rec["last_used_at"] = _now_iso()
-        rec["last_error"] = None
-        if remaining is not None:
-            rec["remaining"] = remaining
-        # 成功不清低配额状态：按最新 remaining 重算档位并持久化——前台
-        # API Keys 页读 Redis status 展示低配额告警，原实现无条件置
-        # active 会覆盖 next_key 算出的 low_quota 状态，告警永远看不到
-        ratio = self._ratio(rec)
-        if ratio is None:
-            rec["status"] = "active"
-        elif ratio < LOW_QUOTA_RATIO:
-            rec["status"] = "low_quota"
-        elif ratio < WARN_QUOTA_RATIO:
-            rec["status"] = "low_quota_warning"
-        else:
-            rec["status"] = "active"
-        await self._write(key_id, rec)
-        # 本地用量计数：ZSet member=now, score=now（按月窗口统计）
+        async with self._pool_lock:
+            # 归还借用（key 完成一次调用）：in-flight 计数回到借出前，
+            # 下次挑选恢复按 remaining 排序（与 next_key 的借用对称）
+            if self._in_flight.get(key_id):
+                self._in_flight[key_id] -= 1
+            rec = self._records.get(key_id)
+            if rec is None:
+                return
+            rec["cooldown_until"] = None
+            rec["last_used_at"] = _now_iso()
+            rec["last_error"] = None
+            if remaining is not None:
+                rec["remaining"] = remaining
+            # 成功不清低配额状态：按最新 remaining 重算档位并持久化——前台
+            # API Keys 页读 Redis status 展示低配额告警，原实现无条件置
+            # active 会覆盖 next_key 算出的 low_quota 状态，告警永远看不到
+            ratio = self._ratio(rec)
+            if ratio is None:
+                rec["status"] = "active"
+            elif ratio < LOW_QUOTA_RATIO:
+                rec["status"] = "low_quota"
+            elif ratio < WARN_QUOTA_RATIO:
+                rec["status"] = "low_quota_warning"
+            else:
+                rec["status"] = "active"
+        # pipeline 化（spec 3.3）：hset+zadd+expire 三连合并为一次 Redis
+        # 往返（热点路径每成功请求都走，三连直连 = 三次往返，压测高并发
+        # 下 Redis 往返数翻三倍）。锁已释放再发 IO——记账在锁内完成，
+        # 持久化到 Redis 不要求持锁（下一次 reload 前写回即可，写回失败
+        # 的后果与旧实现一致：下次 reload 覆盖）
+        pipe = self._redis.pipeline()
+        pipe.hset(self._pool_key, key_id, json.dumps(rec, ensure_ascii=False))
         now = time.time()
-        await self._redis.zadd(f"search:usage:{self.provider}:{key_id}", {str(now): now})
-        await self._redis.expire(f"search:usage:{self.provider}:{key_id}", 60 * 24 * 32)
+        pipe.zadd(f"search:usage:{self.provider}:{key_id}", {str(now): now})
+        pipe.expire(f"search:usage:{self.provider}:{key_id}", 60 * 24 * 32)
+        await pipe.execute()  # 一次往返替代三次
+
+    async def release(self, key_id: str) -> None:
+        """归还借用而不写 key 状态（spec 3.2 补全）。
+
+        网络超时/瞬时错误（classify_error 返回 None）不写 key 状态——
+        沿用「瞬时问题不记账」设计；但借用必须归还，否则 in-flight 泄漏
+        导致该 key 每次超时 +1 永不清零、被无限压低。on_success/on_error
+        内部已归还，本方法供工具层对「不记账」路径显式归还。
+        """
+        async with self._pool_lock:
+            if self._in_flight.get(key_id):
+                self._in_flight[key_id] -= 1
 
     async def on_error(self, key_id: str, kind: ErrorKind,
                        retry_after: int | None = None) -> None:
-        rec = self._records.get(key_id)
-        if rec is None:
-            return
-        if kind == ErrorKind.INVALID:
-            rec["status"] = "invalid"
-            rec["cooldown_until"] = None
-            # key 被剔除是池健康状态的关键变化——立即刷新告警指标，
-            # 否则 invalid_count 增长要到下次 reload 才反映到 Prometheus
-            # （EXHAUSTED 同样永久剔除，但 remaining=0 已由 quota 指标
-            # 覆盖；RATE_LIMIT 是临时冷却不改变池长期健康，不刷新）
-            record_quota_metrics(self.provider, self.health_snapshot())
-        elif kind == ErrorKind.EXHAUSTED:
-            rec["status"] = "exhausted"
-            rec["cooldown_until"] = None
-            rec["remaining"] = 0
-        elif kind == ErrorKind.RATE_LIMIT:
-            rec["status"] = "cooldown"
-            seconds = min(retry_after or DEFAULT_COOLDOWN_SECONDS, RETRY_AFTER_LIMIT)
-            rec["cooldown_until"] = time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + seconds))
-        rec["last_error"] = kind.value
-        await self._write(key_id, rec)
+        async with self._pool_lock:
+            # 归还借用（失败也归还——key 已标记，后续选择自然避开）
+            if self._in_flight.get(key_id):
+                self._in_flight[key_id] -= 1
+            rec = self._records.get(key_id)
+            if rec is None:
+                return
+            if kind == ErrorKind.INVALID:
+                rec["status"] = "invalid"
+                rec["cooldown_until"] = None
+                # key 被剔除是池健康状态的关键变化——立即刷新告警指标，
+                # 否则 invalid_count 增长要到下次 reload 才反映到 Prometheus
+                # （EXHAUSTED 同样永久剔除，但 remaining=0 已由 quota 指标
+                # 覆盖；RATE_LIMIT 是临时冷却不改变池长期健康，不刷新）
+                record_quota_metrics(self.provider, self.health_snapshot())
+            elif kind == ErrorKind.EXHAUSTED:
+                rec["status"] = "exhausted"
+                rec["cooldown_until"] = None
+                rec["remaining"] = 0
+            elif kind == ErrorKind.RATE_LIMIT:
+                rec["status"] = "cooldown"
+                seconds = min(retry_after or DEFAULT_COOLDOWN_SECONDS, RETRY_AFTER_LIMIT)
+                rec["cooldown_until"] = time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + seconds))
+            rec["last_error"] = kind.value
+            await self._write(key_id, rec)
 
     def health_snapshot(self) -> dict:
         """池健康摘要（spec KeyPool 设计节）——配额指标的数据源。

@@ -56,6 +56,7 @@ class FakePool:
         self._records = records
         self.errors = []
         self.successes = []
+        self.releases = []
 
     async def next_key(self):
         for rec in self._records.values():
@@ -65,6 +66,10 @@ class FakePool:
 
     async def on_success(self, key_id, remaining=None):
         self.successes.append(key_id)
+
+    async def release(self, key_id):
+        # 瞬时错误（不记账）路径的借用归还（Task 6 借用对称性）
+        self.releases.append(key_id)
 
     async def on_error(self, key_id, kind, retry_after=None):
         self.errors.append((key_id, kind))
@@ -255,6 +260,71 @@ async def test_rate_limit_does_not_retry_same_key():
     assert result["status"] == "error"
     assert pool.errors == [("k1", ErrorKind.RATE_LIMIT)]
     assert len(made) == 1
+
+
+# ── Task 6: 429 退避 / 借用归还（借用对称性）───────────────────────────────────
+
+
+async def test_rate_limit_backoff_before_retry(monkeypatch, fake_pool):
+    """429 退避（spec C3）：幂等操作 429 重试前必须 sleep(0.5s) 起步，
+    不立即重打冷却 key。断言 sleep 参数恰为 _RATE_LIMIT_BACKOFF——
+    防退避丢失（曾只在代码注释里"规划"过）与参数漂移。
+
+    用真实 KeyPool（fake_pool fixture）：RATE_LIMIT 置 cooldown 后
+    next_key 排除 k1、自然轮到 k2（FakePool 不模拟 cooldown，会因
+    key_id 相同被重试守卫挡住，测不出退避后的换 key）。"""
+    import asyncio
+    import tools.search as search_mod
+
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(search_mod.asyncio, "sleep", fake_sleep)
+    made = []
+    result = await serpapi_google(
+        "q", pool=fake_pool,
+        client_factory=_client_factory(made, fail="google", fail_status=429,
+                                       fail_once=True))
+    assert result["status"] == "ok"  # k1 429 → 退避 → k2 成功
+    assert [c.key for c in made] == ["SERP-a", "SERP-b"]
+    assert slept == [search_mod._RATE_LIMIT_BACKOFF]  # 恰好退避一次
+    assert fake_pool._records["k1"]["status"] == "cooldown"  # 冷却 key 不重打
+
+
+async def test_non_rate_limit_no_backoff(monkeypatch, fake_pool):
+    """非 429 失败（401 INVALID）换 key 重试不 sleep——退避只服务限流，
+    失效 key 的 failover 应即时（退避会无谓拖慢合法 failover）。"""
+    import tools.search as search_mod
+
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(search_mod.asyncio, "sleep", fake_sleep)
+    made = []
+    result = await serpapi_google(
+        "q", pool=fake_pool,
+        client_factory=_client_factory(made, fail="google", fail_status=401,
+                                       fail_once=True))
+    assert result["status"] == "ok"
+    assert [c.key for c in made] == ["SERP-a", "SERP-b"]
+    assert slept == []  # 非 429 不退避
+
+
+async def test_transient_error_releases_borrow():
+    """瞬时错误（网络超时，classify_error 返回 None）不写 key 状态但必须
+    归还借用（Task 6 借用对称性）——否则每次超时 in-flight +1 泄漏，
+    key 被无限压低。FakePool.release 记录调用供断言。"""
+    pool = FakePool(records={"k1": _rec("k1", "SERP-k1")})
+    made = []
+    result = await serpapi_google("q", pool=pool,
+                                  client_factory=_client_factory(made, fail_exc=_FakeTimeout()))
+    assert result["status"] == "error"
+    assert pool.errors == []            # 不记账（瞬时问题不写 key 状态）
+    assert pool.releases == ["k1"]      # 但借用已归还
 
 
 # ── 超时/网络错误不写 key 状态（实测 bug 回归）─────────────────────────────────

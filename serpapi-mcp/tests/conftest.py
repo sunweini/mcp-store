@@ -60,6 +60,43 @@ async def fake_pool():
             self.hset_calls.append((name, mapping))
             return 1
 
+        def pipeline(self):
+            # Task 6：on_success 的 hset+zadd+expire 三连走 pipeline 一次往返。
+            # 委托到 FakeRedis 单命令（复用 hset_calls/zadd_calls/expire_calls）
+            redis = self
+
+            class _Pipe:
+                def __init__(self):
+                    self._cmds = []
+
+                def hset(self, name, key=None, value=None, mapping=None):
+                    if mapping is None:
+                        mapping = {key: value}
+                    self._cmds.append(("hset", name, mapping))
+                    return self
+
+                def zadd(self, name, mapping):
+                    self._cmds.append(("zadd", name, mapping))
+                    return self
+
+                def expire(self, name, seconds):
+                    self._cmds.append(("expire", name, seconds))
+                    return self
+
+                async def execute(self):
+                    for kind, *args in self._cmds:
+                        if kind == "hset":
+                            name, mapping = args
+                            await redis.hset(name, mapping=mapping)
+                        elif kind == "zadd":
+                            await redis.zadd(*args)
+                        elif kind == "expire":
+                            await redis.expire(*args)
+                    self._cmds.clear()
+                    return []
+
+            return _Pipe()
+
         async def zadd(self, name, mapping):
             self.zadd_calls.append((name, mapping))
             return 1
