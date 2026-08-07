@@ -163,7 +163,7 @@ gateway-admin（消费者，lifespan 后台 task）
 
 ### 6.1 templates/mcp-template/CLAUDE.md — 新 MCP 必读
 
-新增「并发与性能规范」章节（强制检查项）：
+新增「并发与性能规范」章节（强制检查项），**并同步修订现有冲突章节**：
 
 ```
 ### C1. HTTP client 必须复用
@@ -174,7 +174,7 @@ gateway-admin（消费者，lifespan 后台 task）
 ### C2. 外呼必须有超时
 - 默认 5s，长任务单独放宽；长任务 semaphore ≤5
 
-### C3. 幂等重试必须带退避
+### C3. 幂等重试必须带退带
 - 429/限流指数退避；非幂等禁止自动重试
 
 ### C4. Redis 每请求往返必须合并
@@ -187,7 +187,14 @@ gateway-admin（消费者，lifespan 后台 task）
 - 断线重建订阅，禁止"断了只能重启容器"
 ```
 
+**同步修订（审模板发现，防自相矛盾）**：
+- **§5 出网代理示范必须改**：现有 `client = httpx.AsyncClient(timeout=10, proxy=proxy)`（每调用新建）正是 C1 禁止的模式 — 改为共享 client 单例 + proxy 配置
+- **C1 与现有章节位置融合**：三种形态分别落位 — 单后端单例 → §1.5 工具组织模式；多 key 共享 → §6 多 API key 池；SDK 账户缓存 → §2.5 附近（新 MCP 按需取用，不重复建独立章节）
+- **C5 与 §2 key 安全合并表述**：共享 client 防 key 串用（禁默认 Authorization 头）与现有"明文 key 禁入日志/metric"同属 key 安全主题，合并表述避免散落
+- §5 代理示范修正为共享 client 形态
+
 ### 6.2 gateway-proxy/CLAUDE.md
+- **必须改现有行（审模板发现自相矛盾源）**：line 11 "失败同时双写 Redis Stream（audit:failures，仅作回滚兜底）" → 改为 "全量调用（成功+失败）XADD 至 audit:calls stream，MySQL 落库在 admin 消费者；proxy 不直连 MySQL"
 - 审计数据流：proxy 只写 `audit:calls`，禁止直连 MySQL
 - token 缓存 + 失效订阅 + Redis 降级
 - 背压/超时配置项
@@ -195,11 +202,18 @@ gateway-admin（消费者，lifespan 后台 task）
 - unmount 必须显式关闭 client
 
 ### 6.3 gateway-admin/CLAUDE.md
+- **必须改现有行**：line 10 "Redis 仅 servers/tokens/失败双写兜底" → 改为 "Redis 仅 servers/tokens；审计消费者 XREADGROUP 批量落 MySQL"
 - 审计消费者：XREADGROUP 批量 + 死信 + 恢复
 - 查询只读 MySQL calls 表，禁读 Redis stream
 
 ### 6.4 根 CLAUDE.md
 - MCP 开发规范速查表补并发条目（C1-C6 一行摘要）
+- **同步修订 5 处旧双写描述**（审文档发现，改造后全部失实）：
+  - line 38 "Redis（配置/状态）"（架构图）— 已正确，不动
+  - line 42 "audit:failures（失败流）" → 删/改 "audit:calls（全量审计缓冲流）"
+  - line 46 "调用审计写 MySQL" → "调用审计 XADD audit:calls，MySQL 落库在 admin 消费者"
+  - line 50 "失败审计流" → "全量审计缓冲流"
+  - line 121 端口表 "配置/状态/失败审计" → "配置/状态/审计缓冲"
 
 ### 6.5 knowledge-base 目录重构 + 新模式文档
 
@@ -217,6 +231,7 @@ knowledge-base/
 
 - patterns/（可复用模式）vs pitfalls/（一次性教训）分类
 - 纯文件迁移，更新 README + 根 CLAUDE.md 引用路径
+- **templates/mcp-template/CLAUDE.md 3 处引用同步改**（审文档发现，漏改则新 MCP 链接失效）：line 51/52/53 知识库节 + line 211 key 池节 → `knowledge-base/patterns/search-mcp-key-pool-pattern.md` 等新路径
 - README 升级为场景触发表（什么情况查什么），非简单清单
 - `audit-async-stream-pattern.md`：审计异步化模式（stream 缓冲 + 消费者批量落库 + 死信），含 D1-D4 决策与 R4/R5/R6 权衡
 
