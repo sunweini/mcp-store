@@ -34,6 +34,8 @@ async def lifespan(app):
     # 移出 proxy 请求路径后由 admin 消费）。task 引用留 lifespan 局部变量即可
     # —— 单 worker 容器（Dockerfile CMD 无 --workers），task 存活于事件循环。
     import audit_consumer
+    import metrics
+    metrics.init_audit_metrics()  # 幂等；无 OTel 依赖时优雅降级（warning 不炸）
     consumer_task = asyncio.create_task(audit_consumer._run_consumer())
     logger.info("admin_started", service="gateway-admin")
     yield

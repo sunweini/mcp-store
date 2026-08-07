@@ -9,6 +9,7 @@
 import asyncio
 import json
 
+import fakeredis.aioredis
 import pytest
 
 import audit_consumer
@@ -137,7 +138,7 @@ async def test_consumer_group_not_exist_creates_group(fake_redis):
 
 
 async def test_consumer_multi_batch_and_retries(fake_redis, fake_pool, monkeypatch):
-    """100 条分两批全消费；连续失败 3 次后进死信不再重试（R2 恢复靠续读）。"""
+    """150 条分两批全消费；死信语义：每次失败即移死信 + XACK（无重试累积）。"""
     for i in range(150):
         await fake_redis.xadd("audit:calls", _msg(i))
     await fake_redis.xgroup_create("audit:calls", "calls-consumers", id="0")
@@ -150,15 +151,23 @@ async def test_consumer_multi_batch_and_retries(fake_redis, fake_pool, monkeypat
     pending = await fake_redis.xpending("audit:calls", "calls-consumers")
     assert pending["pending"] == 0
 
-    # 死信路径：连续 3 次失败 → 第 3 次移死信（含前两批残留），之后继续消费
+    # 死信路径：每次失败 batch 都移死信（3 条消息同批拉走 → 一条死信条目
+    # 含 3 个 ids；再加一条新消息也立即进死信——非"累计 3 次才移"）
     async def _boom(rows):
         raise RuntimeError("db down")
     monkeypatch.setattr(audit_consumer, "_insert_calls", _boom)
-    await fake_redis.xadd("audit:calls", _msg(999))
+    for _ in range(3):
+        await fake_redis.xadd("audit:calls", _msg(999 + _))
     for _ in range(4):
         await audit_consumer._consume_batch(fake_redis)
-    dead = await fake_redis.xrange("audit:calls:dead", count=1)
-    assert len(dead) == 1
+    dead = await fake_redis.xrange("audit:calls:dead")
+    assert len(dead) == 1  # 3 条同批 → 整批一条死信
+    assert len(json.loads(dead[0][1]["batch_ids"])) == 3
+    # 新的失败消息：立即移死信，不等到第 3 次
+    await fake_redis.xadd("audit:calls", _msg(9999))
+    await audit_consumer._consume_batch(fake_redis)
+    dead = await fake_redis.xrange("audit:calls:dead")
+    assert len(dead) == 2
     pending = await fake_redis.xpending("audit:calls", "calls-consumers")
     assert pending["pending"] == 0
 
@@ -229,6 +238,102 @@ async def test_consumer_run_loop_records_batch_size_metrics(fake_redis, fake_poo
         pass
     assert fake_pool.inserted == 3
     assert any(n == "audit_batch_size" and v == 3 for n, v in records)
+
+
+async def test_consumer_redis_blip_self_heals(fake_redis, fake_pool, monkeypatch):
+    """Finding 1：Redis 闪断（xlen 抛异常）→ 消费者自愈不退出，恢复后继续消费。"""
+    calls = {"boom": False, "reads": 0}
+
+    orig_xlen = fake_redis.xlen
+
+    async def flaky_xlen(name):
+        calls["reads"] += 1
+        if not calls["boom"]:
+            return await orig_xlen(name)
+        raise ConnectionError("redis blip")
+
+    monkeypatch.setattr(fake_redis, "xlen", flaky_xlen)
+    # 组建立逻辑绕过闪断的 xlen——先建好组再注入闪断
+    await fake_redis.xgroup_create("audit:calls", "calls-consumers", id="0", mkstream=True)
+    calls["boom"] = True
+
+    async def fake_sleep(sec):
+        if calls["reads"] >= 3:
+            raise asyncio.CancelledError  # 自愈两轮后停
+
+    monkeypatch.setattr(audit_consumer.asyncio, "sleep", fake_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await audit_consumer._run_consumer()  # 闪断期间不抛非 CancelledError = 自愈
+    assert calls["reads"] >= 2  # 闪断后退避重试了至少一轮，没有退出
+
+
+async def test_consumer_loop_backstop_on_unexpected_error(fake_redis, fake_pool, monkeypatch):
+    """Finding 1 兜底：_consume_batch 意外抛异常 → 循环 catch 退避，task 不退出。
+
+    循环内唯一能终止 task 的异常是 asyncio.CancelledError（lifespan shutdown
+    主动取消）；其余异常（含 _consume_batch 意外泄漏的）都被吞掉 + 退避重试。
+    """
+    calls = {"n": 0}
+
+    async def exploding_batch(redis):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("unexpected")
+        return 0
+
+    monkeypatch.setattr(audit_consumer, "_consume_batch", exploding_batch)
+    sleeps = []
+
+    async def fake_sleep(sec):
+        sleeps.append(sec)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(audit_consumer.asyncio, "sleep", fake_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        await audit_consumer._run_consumer()
+    assert calls["n"] >= 1  # 第一轮炸后进入退避（sleep 抛 CancelledError 终止循环）
+    assert sleeps and sleeps[0] == audit_consumer._RETRY_SLEEP  # 退避确实发生
+
+
+async def test_consumer_xgroup_create_failure_is_absorbed(fake_redis, fake_pool, monkeypatch):
+    """Finding 1：xreadgroup 报错 + 建组也失败（Redis 闪断）→ 返回 0 不抛。"""
+    class BlipRedis:
+        async def xlen(self, name):
+            return 0
+
+        async def xreadgroup(self, *a, **kw):
+            raise ConnectionError("no such key / group redis down")
+
+        async def xgroup_create(self, *a, **kw):
+            raise ConnectionError("redis down")
+
+    n = await audit_consumer._consume_batch(BlipRedis())
+    assert n == 0  # 不抛异常
+
+
+async def test_lifespan_calls_init_audit_metrics(monkeypatch):
+    """Finding 3：lifespan 启动时调用 init_audit_metrics()（幂等、无依赖降级）。
+
+    需在 TestClient 进入 lifespan 前 patch（conftest 的 client fixture 已经
+    跑过 lifespan，patch 晚了一步），故本地自建 fixture。
+    """
+    import redis_client
+    import metrics
+    from fastapi.testclient import TestClient
+
+    fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(redis_client, "_redis", fake)
+    calls = {"n": 0}
+
+    def fake_init():
+        calls["n"] += 1
+
+    monkeypatch.setattr(metrics, "init_audit_metrics", fake_init)
+    from app import app
+    with TestClient(app) as c:
+        assert c.get("/api/health").status_code == 200
+    assert calls["n"] == 1  # lifespan 启动恰好调一次（幂等函数，多次启动各调一次）
+    await fake.aclose()
 
 
 async def test_proxy_xadd_maxlen_contract(fake_redis, monkeypatch):

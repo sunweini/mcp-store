@@ -2,9 +2,11 @@
 
 D2：消费者放 gateway-admin（lifespan 后台 task），非 proxy 非独立容器。
 批量参数：batch=100, block=1s（落库延迟 <1s，R1）。
-失败语义（D4 审计可丢）：batch 落库失败 → 移入 audit:calls:dead 死信流
-（XADD 一条含原始 batch + 错误信息），XACK 原消息防无限重试（R2 恢复靠
-XREADGROUP last-delivered 续读，死信人工/后续处理）。
+失败语义（D4 审计可丢）：**每次** batch 落库失败即整批移入 audit:calls:dead
+死信流（XADD 一条含原始 batch ids + 错误信息），并 XACK 原消息——无重试
+累积：不 XACK 会让 PEL 无限重投。R2 恢复靠 XREADGROUP last-delivered 续读，
+死信人工/后续处理。消费者单例必须自愈：循环内任何未预期异常（Redis 闪断）
+记录后退避重试，绝不退出（task 崩溃 = 审计永久停摆）。
 
 消息字段契约（Task 1 proxy audit.py 实测产出，消费端必须按此解析）：
 - time 格式 %Y-%m-%d %H:%M:%S.000 锁死，直写 DATETIME(3) 列
@@ -28,7 +30,7 @@ _GROUP = "calls-consumers"
 _DEAD_STREAM = "audit:calls:dead"
 _BATCH = 100
 _BLOCK_MS = 1000
-_DEAD_RETRIES = 3  # 连续 N 次 batch 失败进死信
+_RETRY_SLEEP = 1.0  # 未预期异常退避重试间隔（审计可丢 D4，恢复速度优先）
 
 
 def _consumer_name() -> str:
@@ -37,11 +39,19 @@ def _consumer_name() -> str:
 
 
 def _record_metric(name: str, value: float) -> None:
-    """运行时取 instrument（不能 from-import），None 时静默跳过。"""
-    import metrics
-    instrument = getattr(metrics, name, None)
-    if instrument is not None:
-        instrument.record(value, {})
+    """运行时取 instrument（不能 from-import），None 时静默跳过。
+
+    记录本身失败（OTel SDK 异常）也消化掉——指标绝不污染消费路径：
+    成功路径里若此处抛异常，会把整批成功落库的消息误移死信。
+    """
+    try:
+        import metrics
+        instrument = getattr(metrics, name, None)
+        if instrument is not None:
+            instrument.record(value, {})
+    except Exception as e:
+        logger.warning("audit_metric_record_failed", metric=name, error=str(e),
+                       service="gateway-admin")
 
 
 async def _insert_calls(rows: list[dict]) -> None:
@@ -69,16 +79,30 @@ async def _move_to_dead(redis, msg_ids: list[tuple[str, str]], error: str) -> No
 
 
 async def _consume_batch(redis) -> int:
-    """拉一批 → 落库 → XACK；落库失败移死信。返回本批条数（失败为负）。"""
+    """拉一批 → 落库 → XACK；落库失败移死信。返回本批条数（失败为负）。
+
+    整个函数（含 queue_depth 采集与建组）不抛异常——所有未预期情况
+    （Redis 闪断等）在这里消化成日志 + 返回 0，让上层循环继续退避重试。
+    """
     # 每批一次取 stream 深度（R9 队列积压可观测；xlen O(1) 低开销）
-    _record_metric("AUDIT_QUEUE_DEPTH", await redis.xlen(_STREAM))
+    try:
+        _record_metric("AUDIT_QUEUE_DEPTH", await redis.xlen(_STREAM))
+    except Exception as e:
+        # Redis 闪断：本批跳过，返回 0 让 _run_consumer 退避后重试
+        logger.warning("audit_consume_redis_unavailable", error=str(e), service="gateway-admin")
+        return 0
     try:
         msgs = await redis.xreadgroup(
             _GROUP, _consumer_name(), {_STREAM: ">"}, count=_BATCH, block=_BLOCK_MS)
     except Exception as e:
-        # 组不存在（首启）：创建组，下轮再读
+        # 组不存在（首启）：创建组，下轮再读；建组自身失败（Redis 闪断）
+        # 也消化掉，不抛——上层循环负责退避重试
         if "no such key" in str(e).lower() or "group" in str(e).lower():
-            await redis.xgroup_create(_STREAM, _GROUP, id="0", mkstream=True)
+            try:
+                await redis.xgroup_create(_STREAM, _GROUP, id="0", mkstream=True)
+            except Exception as gce:
+                logger.warning("audit_consume_group_create_failed", error=str(gce),
+                               service="gateway-admin")
         logger.warning("audit_consume_group_init", error=str(e), service="gateway-admin")
         return 0
     if not msgs:
@@ -95,10 +119,9 @@ async def _consume_batch(redis) -> int:
         await redis.xack(_STREAM, _GROUP, *[i for i, _ in ids])
         return len(ids)
     except Exception as e:
-        # 单条消息可单独进死信而 batch 失败重试——当前语义：整批移死信 + XACK。
-        # 死信成功后必须 XACK 原消息：否则 PEL 无限重投（R2 恢复靠
-        # last-delivered 续读，死信人工/后续处理）。死信写不进（Redis 挂了）
-        # 则保留 PEL，Redis 恢复后自动重试——审计可丢（D4），但尽量不丢。
+        # 每次失败即死信 + XACK（保守语义，无重试累积）：死信成功后必须 XACK
+        # 原消息，否则 PEL 无限重投。死信写不进（Redis 挂了）则保留 PEL，
+        # Redis 恢复后该批会被再次拉到并再次尝试落库。
         try:
             await _move_to_dead(redis, ids, str(e))
             await redis.xack(_STREAM, _GROUP, *[i for i, _ in ids])
@@ -110,13 +133,21 @@ async def _consume_batch(redis) -> int:
 
 async def _run_consumer() -> None:
     r = get_redis()
-    # 确保流与组存在（幂等）
+    # 确保流与组存在（幂等）；失败不阻塞启动——_consume_batch 内会再试
     try:
         await r.xgroup_create(_STREAM, _GROUP, id="0", mkstream=True)
     except Exception:
         pass  # 组已存在
     while True:
-        n = await _consume_batch(r)
+        try:
+            n = await _consume_batch(r)
+        except Exception as e:
+            # 兜底：任何未预期异常（_consume_batch 应已消化）都不能让消费者
+            # task 退出——退避后继续（消费者单例必须自愈，task 崩溃 = 审计停摆）
+            logger.error("audit_consumer_loop_crashed", error=str(e),
+                         error_type=type(e).__name__, service="gateway-admin")
+            await asyncio.sleep(_RETRY_SLEEP)
+            continue
         if n == 0:
             # 空批：XREADGROUP block 已等 1s，极小 sleep 防忙转
             await asyncio.sleep(0.1)
