@@ -23,6 +23,8 @@ class ServerCreate(BaseModel):
     name: str
     url: str
     description: str = ""
+    # 总超时秒（proxy 每请求 wait_for 上限）；None → proxy 默认 90s
+    call_timeout: float | None = None
 
     @field_validator("name")
     @classmethod
@@ -35,6 +37,7 @@ class ServerCreate(BaseModel):
 class ServerUpdate(BaseModel):
     url: str
     description: str = ""
+    call_timeout: float | None = None
 
 
 async def _publish_change(action: str, name: str) -> None:
@@ -54,10 +57,13 @@ async def create_server(req: ServerCreate, _: str = Depends(require_admin)):
         "status": "active", "tools": "[]",
         "health_up": "0", "health_latency_ms": "", "last_health_check": "",
         "created_at": now,
+        # call_timeout None → 不写字段，proxy 挂载时走默认 90s
+        **({"call_timeout": str(req.call_timeout)} if req.call_timeout is not None else {}),
     })
     await r.sadd("servers:active", req.name)
     await _publish_change("add", req.name)
-    return {"name": req.name, "url": req.url, "description": req.description, "status": "active"}
+    return {"name": req.name, "url": req.url, "description": req.description,
+            "status": "active", "call_timeout": req.call_timeout}
 
 
 @router.get("")
@@ -68,11 +74,17 @@ async def list_servers(_: str = Depends(require_admin)):
     for name in names:
         data = await r.hgetall(f"servers:{name}")
         if data:
+            raw_ct = data.get("call_timeout")
+            try:
+                call_timeout = float(raw_ct) if raw_ct else None
+            except (TypeError, ValueError):
+                call_timeout = None
             out.append({
                 "name": data.get("name", name),
                 "url": data.get("url", ""),
                 "description": data.get("description", ""),
                 "status": data.get("status", "active"),
+                "call_timeout": call_timeout,
                 "health": {
                     "up": data.get("health_up") == "1",
                     "latency_ms": float(data["health_latency_ms"]) if data.get("health_latency_ms") else None,
@@ -89,9 +101,13 @@ async def update_server(name: str, req: ServerUpdate, _: str = Depends(require_a
     r = get_redis()
     if not await r.exists(f"servers:{name}"):
         raise HTTPException(status_code=404, detail="server not found")
-    await r.hset(f"servers:{name}", mapping={"url": req.url, "description": req.description})
+    mapping = {"url": req.url, "description": req.description}
+    if req.call_timeout is not None:
+        mapping["call_timeout"] = str(req.call_timeout)
+    await r.hset(f"servers:{name}", mapping=mapping)
     await _publish_change("update", name)
-    return {"name": name, "url": req.url, "description": req.description}
+    return {"name": name, "url": req.url, "description": req.description,
+            "call_timeout": req.call_timeout}
 
 
 @router.delete("/{name}", status_code=204)

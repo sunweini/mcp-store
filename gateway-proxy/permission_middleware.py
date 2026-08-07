@@ -17,7 +17,9 @@ invalid tokens get an empty list; valid tokens see only the tools their
 (server, mode) permissions grant. ping and initialize still pass through
 untouched so health checks work without auth.
 """
+import asyncio
 import inspect
+import os
 import time
 import uuid
 
@@ -43,6 +45,38 @@ from routing import resolve_target, split_prefix, UnknownServerError
 import observability
 
 logger = structlog.get_logger()
+
+# ── Task 4: 背压（per-server semaphore）+ 总超时（wait_for）────────
+# 并发控制：semaphore 上限超出时排队而非打爆后端（后端连接池容量有限，
+# 无界并发会让后端 TCP 队列积压，拖垮全部请求）。
+# 总超时：单请求最长允许时长——后端长任务（tavily research 60s）之上加
+# 余量，默认 90s。绝不能 30s（会把长任务全部掐死）。
+_BACKEND_SEMAPHORES: dict[str, asyncio.Semaphore] = {}
+_BACKEND_SEMAPHORE_LIMIT = int(os.environ.get("BACKEND_SEMAPHORE_LIMIT", "100"))
+_CALL_TIMEOUT_DEFAULT = 90.0
+
+
+def _get_semaphore(server: str) -> asyncio.Semaphore:
+    """返回 per-server 信号量（懒创建，线程内单例）。"""
+    sem = _BACKEND_SEMAPHORES.get(server)
+    if sem is None:
+        sem = asyncio.Semaphore(_BACKEND_SEMAPHORE_LIMIT)
+        _BACKEND_SEMAPHORES[server] = sem
+    return sem
+
+
+def _get_call_timeout(server: str) -> float:
+    """返回 server 的总超时秒数。
+
+    per-server 覆盖从 registry._mounted_timeouts 读（挂载/更新时从
+    servers:{name} hash 缓存，请求路径不读 Redis——每请求读 Redis 会
+    放大请求路径延迟）。缺省 90s。
+    """
+    try:
+        from registry import _mounted_timeouts
+        return _mounted_timeouts.get(server, _CALL_TIMEOUT_DEFAULT)
+    except ImportError:
+        return _CALL_TIMEOUT_DEFAULT
 
 
 def _extract_token(headers: dict[str, str] | None) -> str | None:
@@ -153,26 +187,50 @@ class PermissionMiddleware(Middleware):
 
             raise ToolError(f"Permission denied: {error_type}")
 
-        # ── Call the backend ────────────────────────────────────────
-        try:
-            result = await call_next(context)
-        except Exception as exc:
-            latency_ms = int((time.monotonic() - start) * 1000)
-            err_type = classify_error(exc)
-            fail_stage = tool_name.split("_", 1)[0] if "_" in tool_name else "backend"
-            message = str(exc)
-            await record_call_stream(
-                meta=build_audit_meta(token_info, tool_name, latency_ms, trace_id),
-                status="fail",
-                error_type=err_type,
-                message=message,
-                journey=build_journey(fail_stage, _resolve_server_name(tool_name), latency_ms),
-            )
-            if observability.REQUESTS_TOTAL:
-                observability.REQUESTS_TOTAL.add(1, {"status": "error"})
-            if observability.REQUEST_LATENCY:
-                observability.REQUEST_LATENCY.record(latency_ms / 1000.0)
-            raise
+        # ── Call the backend（背压 + 总超时）───────────────────────
+        # Task 4: 并发超出 semaphore 上限时排队（防止打爆后端连接池）；
+        # wait_for 掐断超时请求（后端挂死不能无限拖住调用方）。
+        # semaphore 持有期间计入超时——排队时间也受总超时约束，避免
+        # 队列堆积时请求无限期等待。
+        server = _resolve_server_name(tool_name)
+        sem = _get_semaphore(server or "unknown")
+        timeout = _get_call_timeout(server)
+        async with sem:
+            try:
+                result = await asyncio.wait_for(call_next(context), timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                latency_ms = int((time.monotonic() - start) * 1000)
+                # 超时计入审计（upstream_timeout），与 httpx 超时同分类
+                message = f"Backend timeout after {timeout}s"
+                await record_call_stream(
+                    meta=build_audit_meta(token_info, tool_name, latency_ms, trace_id),
+                    status="fail",
+                    error_type="upstream_timeout",
+                    message=message,
+                    journey=build_journey(server or "backend", server, latency_ms),
+                )
+                if observability.REQUESTS_TOTAL:
+                    observability.REQUESTS_TOTAL.add(1, {"status": "error"})
+                if observability.REQUEST_LATENCY:
+                    observability.REQUEST_LATENCY.record(latency_ms / 1000.0)
+                raise ToolError(message) from exc
+            except Exception as exc:
+                latency_ms = int((time.monotonic() - start) * 1000)
+                err_type = classify_error(exc)
+                fail_stage = tool_name.split("_", 1)[0] if "_" in tool_name else "backend"
+                message = str(exc)
+                await record_call_stream(
+                    meta=build_audit_meta(token_info, tool_name, latency_ms, trace_id),
+                    status="fail",
+                    error_type=err_type,
+                    message=message,
+                    journey=build_journey(fail_stage, _resolve_server_name(tool_name), latency_ms),
+                )
+                if observability.REQUESTS_TOTAL:
+                    observability.REQUESTS_TOTAL.add(1, {"status": "error"})
+                if observability.REQUEST_LATENCY:
+                    observability.REQUEST_LATENCY.record(latency_ms / 1000.0)
+                raise
 
         latency_ms = int((time.monotonic() - start) * 1000)
         if observability.REQUESTS_TOTAL:

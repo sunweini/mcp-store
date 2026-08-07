@@ -446,6 +446,99 @@ async def test_list_tools_no_underscore_tool_skipped(fake_redis, monkeypatch):
     assert names == {"zabbix_list_active_problems", "zabbix_create_maintenance"}
 
 
+# ─── 背压（semaphore）+ 总超时（wait_for）────────────────────────
+# Task 4: per-server semaphore 限制并发（默认 100）+ 每请求总超时
+# （默认 90s ≥ tavily 长任务 60s + 余量，绝不能 30s）
+
+async def _seed_rw_token(fake_redis, tok: str):
+    from auth import hash_token
+    await fake_redis.hset(
+        f"tokens:{hash_token(tok)}",
+        mapping={"id": "tok_rw", "name": "rw",
+                 "permissions": '{"zabbix": {"read": true, "write": true}}'},
+    )
+
+
+async def test_call_timeout_raises_tool_error(fake_redis, monkeypatch):
+    """call_next 超过总超时 → wait_for 触发 TimeoutError → ToolError + 审计。
+
+    _get_call_timeout 返回短超时（1s），call_next 睡 3s——wait_for 必须
+    在 1s 后掐断并抛 ToolError（与 httpx 超时同分类 upstream_timeout）。
+    """
+    import permission_middleware as pm
+    import asyncio
+
+    await _seed_rw_token(fake_redis, "tok_timeout")
+    monkeypatch.setattr(
+        "permission_middleware.get_http_headers",
+        lambda include=None: {"authorization": "Bearer tok_timeout"},
+    )
+    monkeypatch.setattr(pm, "_get_call_timeout", lambda server: 1.0)
+
+    async def slow_call_next(ctx):
+        await asyncio.sleep(3)
+        return "too_late"
+
+    mw = PermissionMiddleware()
+    ctx = FakeContext("zabbix_list_active_problems")
+
+    with pytest.raises(ToolError, match="timeout"):
+        await mw.on_call_tool(ctx, slow_call_next)
+
+    # 超时计入审计（upstream_timeout），与 httpx 超时同分类
+    entries = await fake_redis.xrange("audit:calls", count=1)
+    assert len(entries) == 1
+    msg = entries[0][1]
+    assert msg["status"] == "fail"
+    assert msg["error_type"] == "upstream_timeout"
+
+
+async def test_call_semaphore_queues_concurrent(fake_redis, monkeypatch):
+    """并发超过 semaphore 上限时排队而非并发打后端。
+
+    把 semaphore 限制压到 1：第一个请求持锁，第二个必须等待（排队），
+    第一个完成后第二个才执行——顺序证明排队生效。
+    """
+    import permission_middleware as pm
+    import asyncio
+
+    await _seed_rw_token(fake_redis, "tok_sem")
+    monkeypatch.setattr(
+        "permission_middleware.get_http_headers",
+        lambda include=None: {"authorization": "Bearer tok_sem"},
+    )
+    monkeypatch.setattr(pm, "_BACKEND_SEMAPHORES", {})
+    monkeypatch.setattr(pm, "_BACKEND_SEMAPHORE_LIMIT", 1)
+    # 长超时避免 wait_for 干扰排队测试
+    monkeypatch.setattr(pm, "_get_call_timeout", lambda server: 30.0)
+
+    events = []
+
+    async def first_call_next(ctx):
+        events.append("first_start")
+        await asyncio.sleep(0.3)
+        events.append("first_end")
+        return "r1"
+
+    async def second_call_next(ctx):
+        events.append("second_start")
+        return "r2"
+
+    mw = PermissionMiddleware()
+    ctx1 = FakeContext("zabbix_list_active_problems")
+    ctx2 = FakeContext("zabbix_list_active_problems")
+
+    r1, r2 = await asyncio.gather(
+        mw.on_call_tool(ctx1, first_call_next),
+        mw.on_call_tool(ctx2, second_call_next),
+    )
+
+    assert r1 == "r1" and r2 == "r2"
+    # second 必须等 first 完成（limit=1 → 排队）
+    assert events.index("first_end") < events.index("second_start"), \
+        f"semaphore did not queue: {events}"
+
+
 # ─── on_call_tool 写 audit:calls 流 ───────────────────────────────
 # 审计单流化后，三条路径（成功/拒绝/异常）各一次 XADD：成功行 message/journey
 # 留空，失败行带 message（错误文案）+ journey（轨迹），供消费者落库后

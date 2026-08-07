@@ -49,6 +49,47 @@ def test_unauth_rejected(client):
     assert client.get("/api/servers").status_code == 401
 
 
+# ─── call_timeout（Task 4: proxy 总超时 per-server 覆盖）──────────
+
+def test_create_server_with_call_timeout(client, fake_redis, auth_headers):
+    """ServerCreate 接受 call_timeout 字段。"""
+    resp = client.post("/api/servers", json={
+        "name": "tavily", "url": "http://tavily:9050/mcp",
+        "description": "Tavily MCP", "call_timeout": 120.5,
+    }, headers=auth_headers)
+    assert resp.status_code == 201
+    assert resp.json()["call_timeout"] == 120.5
+
+
+def test_create_server_call_timeout_optional(client, fake_redis, auth_headers):
+    """call_timeout 缺省 → 不写该字段（proxy 用默认 90s）。"""
+    resp = client.post("/api/servers", json={
+        "name": "zabbix", "url": "http://zabbix:9053/mcp", "description": "",
+    }, headers=auth_headers)
+    assert resp.status_code == 201
+    assert resp.json().get("call_timeout") is None
+
+
+async def test_create_server_call_timeout_persisted(client, fake_redis, auth_headers):
+    """call_timeout 真正写入 Redis hash（proxy 挂载时读取）。"""
+    resp = client.post("/api/servers", json={
+        "name": "srv-ct", "url": "http://srv-ct:9050/mcp",
+        "description": "", "call_timeout": 45,
+    }, headers=auth_headers)
+    assert resp.status_code == 201
+    stored = await fake_redis.hget("servers:srv-ct", "call_timeout")
+    assert float(stored) == 45
+
+
+async def test_update_server_call_timeout(client, fake_redis, auth_headers):
+    name = await _seed_server(fake_redis)
+    resp = client.put(f"/api/servers/{name}", json={
+        "url": "http://new:9050/mcp", "description": "upd", "call_timeout": 30,
+    }, headers=auth_headers)
+    assert resp.status_code == 200
+    assert float(await fake_redis.hget(f"servers:{name}", "call_timeout")) == 30
+
+
 # ─── lifecycle（禁用/停用/启用）─────────────────────────────────
 
 async def _seed_server(fake_redis, name="srv-a"):

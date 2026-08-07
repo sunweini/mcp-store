@@ -228,6 +228,173 @@ async def test_mount_all_default_active_when_no_status(fake_redis, mount_log):
     assert mount_log["mount"] == [("old", "http://old")]
 
 
+# ─── Task 4: Client 复用 + unmount 显式关闭 ─────────────────────
+
+async def test_mount_reuses_client(fake_redis, monkeypatch):
+    """同 URL 多次 _get_or_create_client 只创建 1 个底层 Client（连接池复用）。
+
+    _mount_one 通过 _make_client_factory → _get_or_create_client 拿缓存
+    Client；同 URL 重复挂载（disable→enable 热切换）必须复用缓存实例，
+    不能每次新建（每新建一个 ProxyClient 意味着新连接池，回到每请求
+    TCP+TLS 的老问题）。
+    """
+    from fastmcp.server.providers.proxy import ProxyClient
+    import registry
+
+    created: list[ProxyClient] = []
+    real_get = registry._get_or_create_client
+
+    def counting_get(url: str):
+        # 包一层真实实现：新建（缓存未命中）时计数
+        client = real_get(url)
+        if id(client) not in [id(c) for c in created]:
+            created.append(client)
+        return client
+
+    monkeypatch.setattr(registry, "_get_or_create_client", counting_get)
+    registry._mounted_clients.clear()
+    registry._mounted_urls.clear()
+
+    c1 = registry._get_or_create_client("http://backend:9050/mcp")
+    c2 = registry._get_or_create_client("http://backend:9050/mcp")
+    assert c1 is c2, "same URL must return the cached client instance"
+    # 不同 URL 各自创建
+    c3 = registry._get_or_create_client("http://backend:9051/mcp")
+    assert c3 is not c1
+    assert len(created) == 2, f"expected 2 unique clients, got {len(created)}"
+
+    # 挂载路径端到端：同 URL 两次 _mount_one 共用同一缓存
+    from fastmcp import FastMCP
+    registry._mounted_clients.clear()
+    registry._mounted_urls.clear()
+    gateway = FastMCP("test")
+    await registry._mount_one(gateway, "srv-a", "http://backend:9050/mcp")
+    await registry._unmount_one(gateway, "srv-a")  # 模拟热切换的卸载
+    await registry._mount_one(gateway, "srv-a", "http://backend:9050/mcp")
+    # 热切换后缓存里仍是同一个 Client 实例（连接池保持热）
+    assert len([k for k in registry._mounted_clients if k == "http://backend:9050/mcp"]) == 1
+
+
+async def test_unmount_closes_client(fake_redis, monkeypatch):
+    """_unmount_one 显式关闭缓存 Client（原实现靠 GC，连接泄漏）。"""
+    from fastmcp import FastMCP
+    import registry
+
+    closed: list[str] = []
+
+    class FakeClient:
+        def __init__(self, url):
+            self.url = url
+        async def close(self):
+            closed.append(self.url)
+        def new(self):
+            return self
+
+    monkeypatch.setattr(registry, "_get_or_create_client",
+                        lambda url: FakeClient(url))
+    registry._mounted_clients.clear()
+    registry._mounted_urls.clear()
+
+    gateway = FastMCP("test")
+    await registry._mount_one(gateway, "srv-a", "http://backend:9050/mcp")
+    # 手动塞缓存（_mount_one 不触发 factory，缓存由 factory 懒填充）
+    registry._mounted_clients["http://backend:9050/mcp"] = FakeClient("http://backend:9050/mcp")
+    registry._mounted_urls["srv-a"] = "http://backend:9050/mcp"
+
+    await registry._unmount_one(gateway, "srv-a")
+
+    assert closed == ["http://backend:9050/mcp"], f"client not closed, got {closed}"
+    assert "srv-a" not in registry._mounted_urls
+    assert "http://backend:9050/mcp" not in registry._mounted_clients
+
+
+# ─── pubsub 自愈 ────────────────────────────────────────────────
+
+async def test_watch_changes_pubsub_resubscribe(fake_redis, monkeypatch):
+    """listen 断连（抛异常退出）后重建订阅，双频道继续收消息。
+
+    redis-py 的 pubsub listen() 断连时抛异常退出循环，不会自动重连。
+    watch_changes 必须捕获后重建 pubsub + 重新订阅双频道。本测试：
+    pubsub #1 的 listen 抛 ConnectionError（模拟断连）→ watch_changes
+    创建 pubsub #2 → 后续 publish 的消息正常处理（_sync_one 收到）。
+    """
+    import registry
+
+    synced = []
+    async def fake_sync_one(gw, name, info):
+        synced.append(name)
+    monkeypatch.setattr(registry, "_sync_one", fake_sync_one)
+    monkeypatch.setattr(registry, "_unmount_one", async_noop)
+
+    n_created = {"n": 0}
+
+    class FirstPubsub:
+        """第 1 个 pubsub：listen 在订阅确认帧后抛 ConnectionError 模拟断连。
+
+        注意：async generator 的 __anext__ 是只读的（CPython），不能直接
+        赋值——用包装 generator 实现（外层 generator 转发内层，首帧后抛错）。
+        """
+        def __init__(self):
+            self.ps = fake_redis.pubsub()
+        async def subscribe(self, *channels):
+            return await self.ps.subscribe(*channels)
+        def listen(self):
+            inner = self.ps.listen()
+            async def wrapped():
+                async for frame in inner:
+                    if frame.get("type") == "subscribe":
+                        # 交付订阅确认后模拟断连抛错（reconnect 前的最后一眼）
+                        yield frame
+                        raise ConnectionError("pubsub disconnected")
+                    yield frame
+            return wrapped()
+        async def aclose(self):
+            await self.ps.aclose()
+
+    def make_pubsub():
+        n_created["n"] += 1
+        if n_created["n"] == 1:
+            return FirstPubsub()
+        return fake_redis.pubsub()
+
+    class WrappedRedis:
+        def pubsub(self):
+            return make_pubsub()
+        async def hgetall(self, key):
+            return await fake_redis.hgetall(key)
+
+    monkeypatch.setattr(registry, "get_redis", lambda: WrappedRedis())
+    # 加速重连退避（默认 5s，测试等不起）
+    monkeypatch.setattr(registry, "_PUBSUB_RETRY_DELAY", 0.1)
+
+    gateway = FakeGW()
+    task = asyncio.create_task(registry.watch_changes(gateway))
+    try:
+        # 发一条消息：pubsub #1 的 listen 首帧（subscribe 确认）正常返回，
+        # watch_changes 的 async for 继续取帧时抛 ConnectionError → 重建
+        await asyncio.wait_for(
+            pubsub_send(fake_redis, "server:changed", json.dumps({"action": "add", "name": "s1"})),
+            timeout=5,
+        )
+        # 等重建（pubsub #2 建立）——retry_delay 是 5s，等 10s 覆盖
+        await asyncio.wait_for(wait_for(lambda: n_created["n"] == 2), timeout=15)
+        assert n_created["n"] == 2, f"expected 2 pubsubs (1 dead + 1 rebuilt), got {n_created['n']}"
+        # 重建后消息仍能正常处理
+        await fake_redis.hset("servers:s2", mapping={"url": "http://s2", "status": "active"})
+        await asyncio.wait_for(
+            pubsub_send(fake_redis, "server:changed", json.dumps({"action": "add", "name": "s2"})),
+            timeout=5,
+        )
+        await asyncio.wait_for(wait_for(lambda: "s2" in synced), timeout=5)
+        assert synced == ["s2"], f"expected s2 synced after rebuild, got {synced}"
+    finally:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, BaseException):
+            pass
+
+
 # ─── token:changed 失效通道 ────────────────────────────────────
 
 async def test_watch_changes_token_changed_invalidates_cache(fake_redis, monkeypatch):
