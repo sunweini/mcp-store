@@ -54,7 +54,7 @@ gateway-admin（消费者，lifespan 后台 task）
                └── ⑦ 死信：连续 N 次失败的 batch 移入 audit:calls:dead
 ```
 
-- Stream：`audit:calls`，MAXLEN ~50000（approximate），消费者组 `calls-consumers`，消费者名 = 容器 hostname
+- Stream：`audit:calls`（新流，替代 `audit:failures` 10000 上限的旧流），MAXLEN 50000（approximate），消费者组 `calls-consumers`，消费者名 = 容器 hostname
 - proxy 删除 `db.py`/`record_call`（不再直连 MySQL）
 - 失败行 message/journey 完整（前端失败面板依赖）；成功行留空（现状等价）
 - 落库延迟 <1s（XREADGROUP block 1s + batch 100）
@@ -63,9 +63,12 @@ gateway-admin（消费者，lifespan 后台 task）
 
 ### 2.1 Token 本地缓存
 - 进程内 TTL 缓存：`token_hash → token_info`，TTL 60s，LRU 上限 ~1000
-- admin 改 token → publish `token:changed` → proxy 失效对应项（扩 pubsub 订阅）
 - Redis 瞬时故障 → 缓存继续放行，防 403 风暴
 - 命中缓存免 Redis，未命中走 Redis（verify_token 语义不变）
+- **缓存失效必须新增通道**：admin tokens.py 当前 create/delete **不 publish 任何通知**（已核实，tokens.py 仅 hset/set）。删除 token 后缓存仍可用 60s = 吊销延迟（安全漏洞）。
+  - **新增**：admin `tokens.py` 在 create/delete 时 publish `token:changed`（payload 含 token_hash）
+  - **新增**：proxy `watch_changes` 扩订阅 `token:changed` → 失效对应缓存项
+  - 权限变更（update 权限）同走 `token:changed`，保证吊销与变更即时生效
 
 ### 2.2 连接池泄漏修复（registry.py TODO）
 - 存 `_mounted_clients[name] = provider` 引用，unmount 时显式 `aclose()` 底层 client
@@ -109,6 +112,10 @@ gateway-admin（消费者，lifespan 后台 task）
 |---|---|---|
 | zabbix | 进程级单例 client，httpx 复用 | 否（正面样板） |
 | aliyun | ClientFactory 账户缓存，SDK 复用 | 否（正面样板） |
+
+补充（读码核实）：
+- aliyun 已有自身 pubsub 自愈（account_store.py `_resubscribe` 逻辑）+ `aliyndns:changed` 通道已存在 — 与 spec 2.3 的 proxy 自愈改造无关，aliyun 无需动
+- zabbix 无 key 池、无 pubsub — 不涉及热更新通道
 
 规范分三类写清（见 6.1 C1）。
 
