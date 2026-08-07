@@ -1,8 +1,37 @@
-"""TavilyClient tests — endpoints, auth, error mapping, usage."""
+"""TavilyClient tests — endpoints, auth, error mapping, usage.
+
+Task 5（并发加固）新增用例：共享 client 单例（连接池复用）与
+R5 防护——共享 client 禁止默认 Authorization 头，key 走请求级传递。
+"""
 import httpx
 import pytest
 
 from tavily_client import TavilyClient, classify_error
+
+
+def test_shared_client_singleton():
+    """get_shared_client 多次调用返回同一实例（连接池复用）。"""
+    from tavily_client import get_shared_client
+    assert get_shared_client() is get_shared_client()
+
+
+def test_no_default_auth_header():
+    """共享 client 无默认 Authorization 头（R5 key 串用防护）。"""
+    from tavily_client import get_shared_client
+    client = get_shared_client()
+    assert "Authorization" not in client.headers  # 共享 client 恒无默认凭证
+
+
+async def test_request_sends_bearer_header(mock_transport):
+    """每请求显式带 key 头——共享 client 无默认凭证，靠请求级传递。
+
+    回归点：若 key 落回 client 构造的默认 headers（改造前形态），共享
+    单例会串用第一个 key——本测试 + test_no_default_auth_header 双锁。
+    """
+    client = TavilyClient("tvly-test", transport=mock_transport({}))
+    await client.search({"query": "q"})
+    assert mock_transport.last_request.headers["Authorization"] == "Bearer tvly-test"
+    await client.close()
 
 
 async def test_search_success(mock_transport):

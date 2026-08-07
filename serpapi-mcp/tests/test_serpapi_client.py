@@ -1,10 +1,48 @@
-"""SerpapiClient tests — engine param, api_key, error mapping (incl. account limit)."""
+"""SerpapiClient tests — engine param, api_key, error mapping (incl. account limit).
+
+Task 5（并发加固）新增用例：共享 client 单例（连接池复用）与 R5
+防护——共享 client 无默认凭证（serpapi 的 api_key 是 URL query 参数，
+不走 header；断言共享 client 无默认 Authorization 头 + 每请求 key 走
+query）。
+"""
 import json
 
 import httpx
 import pytest
 
 from serpapi_client import SerpapiClient, SerpapiError, classify_error
+
+
+def test_shared_client_singleton():
+    """get_shared_client 多次调用返回同一实例（连接池复用）。"""
+    from serpapi_client import get_shared_client
+    assert get_shared_client() is get_shared_client()
+
+
+def test_no_default_auth_header():
+    """共享 client 无默认凭证头（R5 key 串用防护）。
+
+    serpapi 的 api_key 走 URL query 而非 header——共享 client 无
+    Authorization/默认 headers，key 泄漏风险只存在于 query 路径
+    （由 httpx logger WARNING 防线 + 日志不记完整 URL 处理）。
+    """
+    from serpapi_client import get_shared_client
+    client = get_shared_client()
+    assert "Authorization" not in client.headers  # 共享 client 恒无默认凭证
+
+
+async def test_request_sends_api_key_in_query():
+    """每请求 key 走 query 参数——共享 client 无默认凭证，靠请求级传递。
+
+    回归点：若 key 落回 client 构造的默认（改造前形态），共享单例会
+    串用第一个 key；serpapi 形态是 query 而非 header，断言点在
+    last_request.url.params["api_key"]。
+    """
+    transport = MockTransport({"organic_results": []})
+    client = SerpapiClient("serp-test", transport=transport)
+    await client.search("google", {"q": "hello"})
+    assert transport.last_request.url.params["api_key"] == "serp-test"
+    await client.close()
 
 
 class MockTransport(httpx.AsyncBaseTransport):

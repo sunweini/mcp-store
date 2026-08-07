@@ -1,8 +1,79 @@
-"""BraveClient tests — endpoints, X-Subscription-Token auth, error mapping."""
+"""BraveClient tests — endpoints, X-Subscription-Token auth, error mapping.
+
+Task 5（并发加固）新增用例：共享 client 单例（连接池复用）与 R5
+防护——共享 client 无默认凭证头，key 走请求级传递。原「proxy 经
+BraveClient 透传」两测试改为断言共享 client 的代理形态（proxy 归
+共享 client 所有，构造时从 SEARCH_PROXY env 读）。
+"""
 import httpx
 import pytest
 
-from brave_client import BraveClient, BraveError, classify_error
+from brave_client import BraveClient, BraveError, classify_error, get_shared_client
+
+
+def test_shared_client_singleton():
+    """get_shared_client 多次调用返回同一实例（连接池复用）。"""
+    assert get_shared_client() is get_shared_client()
+
+
+def test_no_default_auth_header():
+    """共享 client 无默认 X-Subscription-Token 头（R5 key 串用防护）。"""
+    client = get_shared_client()
+    assert "X-Subscription-Token" not in client.headers  # 共享 client 恒无默认凭证
+
+
+async def test_request_sends_key_header():
+    """每请求显式带 key 头——共享 client 无默认凭证，靠请求级传递。
+
+    回归点：若 key 落回 client 构造的默认 headers（改造前形态），共享
+    单例会串用第一个 key——本测试 + test_no_default_auth_header 双锁。
+    """
+    transport = MockTransport({"web": {"results": []}})
+    client = BraveClient("BSA-test", transport=transport)
+    await client.web_search({"q": "hello"})
+    assert transport.last_request.headers["X-Subscription-Token"] == "BSA-test"
+    await client.close()
+
+
+async def test_shared_client_honors_search_proxy_env(monkeypatch):
+    """共享 client 按 SEARCH_PROXY 走代理（brave 生产必须走内网代理）。
+
+    回归点：proxy 归共享 client 所有（构造时从 env 读）——若代理回到
+    BraveClient 逐请求传，共享 client 会直连（生产网络必失败）。
+    断言点放在 get_shared_client 构造处：捕获 httpx.AsyncClient 的
+    proxy 关键字。重置模块单例避免跨测试污染（singleton 语义下
+    只能测"首次构造"路径）。
+    """
+    import brave_client
+    monkeypatch.setenv("SEARCH_PROXY", "http://10.16.12.12:7890")
+    captured = {}
+    real_init = httpx.AsyncClient.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        captured["proxy"] = kwargs.get("proxy")
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", _patched_init)
+    brave_client._shared_client = None  # 重置单例，按当前 env 重建
+    client = brave_client.get_shared_client()
+    assert captured["proxy"] == "http://10.16.12.12:7890"
+
+
+async def test_shared_client_no_proxy_when_env_empty(monkeypatch):
+    """未配置 SEARCH_PROXY 时共享 client 直连（proxy=None，httpx 不启用代理）。"""
+    import brave_client
+    monkeypatch.delenv("SEARCH_PROXY", raising=False)
+    captured = {}
+    real_init = httpx.AsyncClient.__init__
+
+    def _patched_init(self, *args, **kwargs):
+        captured["proxy"] = kwargs.get("proxy")
+        return real_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", _patched_init)
+    brave_client._shared_client = None
+    client = brave_client.get_shared_client()
+    assert captured["proxy"] is None
 
 
 class MockTransport(httpx.AsyncBaseTransport):
@@ -77,36 +148,4 @@ async def test_local_search_endpoint():
     result = await client.local_search({"q": "pizza"})
     assert result["local"]["results"][0]["title"] == "t"
     assert transport.last_request.url.path == "/res/v1/local/search"
-    await client.close()
-
-
-async def test_proxy_passed_to_httpx_client(monkeypatch):
-    # 生产网络 brave 直连不通,必须走内网代理。MockTransport 注入模式下
-    # 代理不参与请求路径（httpx >= 0.27 允许 proxy 与 transport 共存），
-    # 断言点放在构造函数：proxy 关键字透传给 httpx.AsyncClient。
-    captured = {}
-    real_init = httpx.AsyncClient.__init__
-
-    def _patched_init(self, *args, **kwargs):
-        captured["proxy"] = kwargs.get("proxy")
-        return real_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(httpx.AsyncClient, "__init__", _patched_init)
-    client = BraveClient("BSA-test", proxy="http://10.16.12.12:7890")
-    assert captured["proxy"] == "http://10.16.12.12:7890"
-    await client.close()
-
-
-async def test_proxy_none_means_direct(monkeypatch):
-    # 未配置 SEARCH_PROXY 时传 None = 直连,httpx 不启用任何代理
-    captured = {}
-    real_init = httpx.AsyncClient.__init__
-
-    def _patched_init(self, *args, **kwargs):
-        captured["proxy"] = kwargs.get("proxy")
-        return real_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(httpx.AsyncClient, "__init__", _patched_init)
-    client = BraveClient("BSA-test", proxy=None)
-    assert captured["proxy"] is None
     await client.close()

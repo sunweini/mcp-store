@@ -1,7 +1,13 @@
-"""Tavily REST API client.
+"""Tavily REST API client — 共享 httpx client 薄封装。
 
 Endpoints: POST https://api.tavily.com/{search|extract|crawl|map|research}
 Auth: Bearer token. Usage: GET /usage (官方剩余配额).
+
+Task 5（并发加固）改造：调用前每请求新建 AsyncClient（TCP+TLS 握手
+每请求一次），现在进程级单例 httpx.AsyncClient（连接池复用，共享
+client 禁止默认 Authorization 头——防 key 串用 R5），key 走请求级
+headers，timeout 走 per-request 参数。公开方法签名（search(params)
+等）与 factory 签名 (key, timeout) 均不变——只改内部实现。
 
 Error classification (per spec 错误语义映射):
 - 401/403 → INVALID（key 失效，永久剔除）
@@ -22,6 +28,21 @@ tracer = trace.get_tracer("tavily_mcp.tavily_client")
 
 API_BASE = "https://api.tavily.com"
 RETRYABLE_IF_IDEMPOTENT = {"search", "extract", "map"}
+
+# 进程级共享 client：连接池复用，禁止默认 Authorization 头（R5）
+_shared_client: httpx.AsyncClient | None = None
+_SHARED_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=50)
+
+
+def get_shared_client() -> httpx.AsyncClient:
+    """进程级单例 httpx.AsyncClient（连接池复用）。"""
+    global _shared_client
+    if _shared_client is None:
+        _shared_client = httpx.AsyncClient(
+            timeout=30.0,  # 兜底超时；工具层 per-request 覆盖
+            limits=_SHARED_LIMITS,
+        )
+    return _shared_client
 
 
 def classify_error(exc: Exception, status_code: int | None = None) -> ErrorKind | None:
@@ -53,11 +74,10 @@ class TavilyClient:
     def __init__(self, key: str, timeout: float = 5.0, transport=None):
         self._key = key
         self._timeout = timeout
-        self._http = httpx.AsyncClient(
-            timeout=timeout,
-            headers={"Authorization": f"Bearer {key}"},
-            transport=transport,
-        )
+        # transport 注入仅测试用：注入时自建 client（关闭权归调用方），
+        # 否则用进程级共享 client（连接池复用，禁止默认凭证头——R5）
+        self._http = (get_shared_client() if transport is None
+                      else httpx.AsyncClient(timeout=timeout, transport=transport))
 
     async def search(self, params: dict) -> dict:
         return await self._post("search", params)
@@ -82,7 +102,11 @@ class TavilyClient:
         with tracer.start_as_current_span("tavily_client.usage") as span:
             span.set_attributes({"http.method": "GET", "http.url": f"{API_BASE}/usage"})
             start = time.monotonic()
-            resp = await self._http.get(f"{API_BASE}/usage")
+            resp = await self._http.get(
+                f"{API_BASE}/usage",
+                headers={"Authorization": f"Bearer {self._key}"},
+                timeout=self._timeout,
+            )
             duration = time.monotonic() - start
             span.set_attribute("http.status_code", resp.status_code)
             if resp.status_code >= 400:
@@ -100,7 +124,11 @@ class TavilyClient:
         with tracer.start_as_current_span(f"tavily_client.{endpoint}") as span:
             span.set_attributes({"http.method": "POST", "http.url": f"{API_BASE}/{endpoint}"})
             start = time.monotonic()
-            resp = await self._http.post(f"{API_BASE}/{endpoint}", json=params)
+            resp = await self._http.post(
+                f"{API_BASE}/{endpoint}", json=params,
+                headers={"Authorization": f"Bearer {self._key}"},
+                timeout=self._timeout,
+            )
             duration = time.monotonic() - start
             span.set_attribute("http.status_code", resp.status_code)
             if resp.status_code >= 400:
@@ -115,4 +143,6 @@ class TavilyClient:
             return resp.json()
 
     async def close(self) -> None:
-        await self._http.aclose()
+        # 共享 client 进程级存活，不得关闭——只关测试注入的私有 client
+        if self._http is not get_shared_client():
+            await self._http.aclose()

@@ -9,7 +9,6 @@ Error/failover strategy (per spec 错误处理节):
 - client_factory 注入: 默认构造真实 BraveClient(5s 超时),测试注入
   FakeClient 驱动公开方法,不依赖私有 _get
 """
-import os
 from typing import Callable, Optional
 
 from fastmcp import FastMCP
@@ -21,11 +20,6 @@ from brave_client import BraveClient, classify_error
 logger = structlog.get_logger()
 
 DEFAULT_TIMEOUT = 5.0
-
-# 生产网络 api.search.brave.com 直连不通（IPv4 被墙、IPv6 不通），仅
-# brave 需要走内网代理（tavily/serpapi 直连通）。工具层直接读 env（与
-# server.py 同进程，两种读法等价；简单优先）。空串 = 直连。
-SEARCH_PROXY = os.environ.get("SEARCH_PROXY", "")
 
 # 单一来源：工具名 → endpoint/参数上限/重试策略。endpoint 即 BraveClient
 # 公开方法名（web_search/local_search）；两个工具都是幂等 GET,统一
@@ -41,9 +35,11 @@ ClientFactory = Callable[[str, float], object]
 
 
 def _default_factory(key: str, timeout: float) -> BraveClient:
-    # SEARCH_PROXY 空串（未配置）时传 None = 直连，避免 httpx 对空串
-    # 报 "Proxy URL must be valid" 之类解析错误
-    return BraveClient(key, timeout=timeout, proxy=SEARCH_PROXY or None)
+    # Task 5：proxy 不再经 BraveClient 逐请求传——共享 client 在
+    # get_shared_client() 里从 SEARCH_PROXY env 读定（生产必须走
+    # 内网代理）。proxy 参数保留仅为兼容旧签名，transport 为 None 时
+    # 实际走共享 client（含代理）
+    return BraveClient(key, timeout=timeout)
 
 
 async def _call_with_pool(pool, tool_name: str, params: dict,
