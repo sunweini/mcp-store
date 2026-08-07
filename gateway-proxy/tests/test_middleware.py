@@ -4,9 +4,9 @@ import httpx
 
 from middleware import (
     build_journey,
+    build_audit_meta,
     check_call_permission,
     classify_error,
-    record_call_audit,
 )
 from routing import register_tools, clear_tools
 
@@ -62,8 +62,8 @@ def test_classify_error_generic():
 
 
 # ─── build_journey ────────────────────────────────────────────────
-# 失败面板数据源统一到 MySQL 后，on_call_tool 与 record_call_failure 共用
-# 此函数构建轨迹；state 推演逻辑（ok/fail/skip）必须与旧内联实现完全一致
+# on_call_tool 的拒绝/异常两条失败路径共用此函数构建轨迹；
+# state 推演逻辑（ok/fail/skip）是消费者落 MySQL 后失败面板轨迹的数据源
 
 def test_build_journey_fail_in_middle():
     """fail_stage 之前的 stage 是 ok，fail stage 带总耗时，之后是 skip。"""
@@ -97,60 +97,41 @@ def test_build_journey_unmatched_stage_all_ok():
     assert all(s["state"] == "ok" for s in journey)
 
 
-# ─── record_call_audit: 未注册 server 仍能解析 server/tool ─────────
+# ─── build_audit_meta: 未注册 server 仍能解析 server/tool ─────────
 # 生产 bug：server 禁用后从 TOOL_REGISTRY 卸载，resolve_target 抛
 # UnknownServerError，审计记录 server/tool 落空。修复后由 split_prefix
 # （纯前缀切分，不查 registry）解析，op 在 registry 缺失时默认 read。
+# build_audit_meta 是 on_call_tool 三条审计路径共用 meta 的唯一出口，
+# 此行为必须保持（record_call_stream 收到的字段依赖它）。
 
-async def test_record_call_audit_ghost_server_resolved(monkeypatch):
-    """server 未注册（禁用后 registry 卸载）时，calls 行仍带 server/tool。"""
-    rows = []
-
-    async def fake_record_call(meta, status, error_type=None, message=None, journey=None):
-        rows.append({"meta": meta, "status": status, "error_type": error_type})
-
-    monkeypatch.setattr("middleware.record_call", fake_record_call)
-    # 不注册 ghost-mcp：模拟禁用后从 TOOL_REGISTRY 卸载的状态
-    await record_call_audit(
+def test_build_audit_meta_ghost_server_resolved():
+    """server 未注册（禁用后 registry 卸载）时，meta 仍带 server/tool。"""
+    meta = build_audit_meta(
         token_info={"name": "tok"},
         mcp_name="ghost-mcp_web_search",
         latency_ms=1,
         trace_id="trace-ghost",
-        status="fail",
-        error_type="permission_denied",
-        message="Denied: ghost-mcp_web_search",
     )
-    assert len(rows) == 1
-    meta = rows[0]["meta"]
     assert meta["server"] == "ghost-mcp"
     assert meta["tool"] == "web_search"
     assert meta["op"] == "read"  # resolve_target 失败 -> 默认 read
-    assert rows[0]["status"] == "fail"
-    assert rows[0]["error_type"] == "permission_denied"
+    assert meta["token_name"] == "tok"
+    assert meta["latency_ms"] == 1
+    assert meta["trace_id"] == "trace-ghost"
+    # time 格式锁死 %Y-%m-%d %H:%M:%S.000（固定 .000，admin 消费者按此解析）
+    assert meta["time"] == "2026-08-07 00:00:00.000" or meta["time"].endswith(".000")
 
 
-async def test_record_call_audit_ghost_server_op_registry_lookup(monkeypatch):
+def test_build_audit_meta_op_registry_lookup():
     """server 未注册时 op 降级 read；正常注册路径 op 仍取 registry 的 mode。"""
-    rows = []
-
-    async def fake_record_call(meta, status, error_type=None, message=None, journey=None):
-        rows.append(meta)
-
-    monkeypatch.setattr("middleware.record_call", fake_record_call)
-
     # ghost 未注册 -> op 默认 read
-    await record_call_audit(
-        token_info=None, mcp_name="ghost-mcp_web_search",
-        latency_ms=1, trace_id="t1", status="fail",
-        error_type="permission_denied", message="Denied",
-    )
-    assert rows[-1]["op"] == "read"
+    meta = build_audit_meta(None, "ghost-mcp_web_search", 1, "t1")
+    assert meta["op"] == "read"
+    # token_info=None -> token_name 为 "(anonymous)"
+    assert meta["token_name"] == "(anonymous)"
 
     # zabbix 已注册 write 工具 -> op 取真实 mode（fixture 已注册）
-    await record_call_audit(
-        token_info=None, mcp_name="zabbix_create_maintenance",
-        latency_ms=1, trace_id="t2", status="ok",
-    )
-    assert rows[-1]["server"] == "zabbix"
-    assert rows[-1]["tool"] == "create_maintenance"
-    assert rows[-1]["op"] == "write"
+    meta = build_audit_meta(None, "zabbix_create_maintenance", 1, "t2")
+    assert meta["server"] == "zabbix"
+    assert meta["tool"] == "create_maintenance"
+    assert meta["op"] == "write"

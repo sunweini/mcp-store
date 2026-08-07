@@ -2,13 +2,15 @@
 
 This is the wiring layer between FastMCP's middleware pipeline and the helper
 functions in middleware.py (check_call_permission, classify_error,
-record_call_failure). It intercepts every tools/call request:
+build_audit_meta). It intercepts every tools/call request:
 
 1. Extracts the Bearer token from HTTP headers (get_http_headers).
 2. Verifies the token against Redis (auth.verify_token).
 3. Checks the token grants (server, mode) access (check_call_permission).
-4. If denied -> records an audit failure + increments metrics + raises ToolError.
+4. If denied -> records an audit XADD (audit.record_call_stream) + increments
+   metrics + raises ToolError.
 5. If allowed -> calls the backend; on exception classifies + records the failure.
+6. On success -> records the audit XADD with status=ok (full call detail).
 
 tools/list is filtered by token permissions (on_list_tools): anonymous or
 invalid tokens get an empty list; valid tokens see only the tools their
@@ -28,11 +30,11 @@ from opentelemetry import trace
 from auth import verify_token, check_permission
 from middleware import (
     build_journey,
+    build_audit_meta,
     check_call_permission,
     classify_error,
-    record_call_audit,
-    record_call_failure,
 )
+from audit import record_call_stream
 from routing import resolve_target, split_prefix, UnknownServerError
 # CRITICAL: import the module (not `from observability import ...`) so that
 # attribute access resolves at CALL TIME, picking up the post-init_telemetry()
@@ -74,11 +76,11 @@ def _resolve_server_name(mcp_name: str) -> str:
     """Best-effort 解析工具名对应的 server 名，解析失败返回 ""。
 
     供 build_journey 决定轨迹末段 stage 名（真实 server 名或回退 "backend"），
-    与 record_call_failure 内部的 resolve 容错语义保持一致。
+    与 build_audit_meta 内部的 resolve 容错语义保持一致。
     """
     # split_prefix 只按第一个 _ 切分，不依赖 TOOL_REGISTRY：server 禁用
-    # （unmount）后也能解析出真实 server 名，与 record_call_failure 同步
-    # （record_call_audit 收到的 journey 用同一 server 名，两处 stage 一致）
+    # （unmount）后也能解析出真实 server 名，与 build_audit_meta 同步
+    # （record_call_stream 收到的 journey 用同一 server 名，两处 stage 一致）
     try:
         server, _ = split_prefix(mcp_name)
         return server
@@ -132,21 +134,12 @@ class PermissionMiddleware(Middleware):
             latency_ms = int((time.monotonic() - start) * 1000)
             fail_stage = "auth" if error_type == "invalid_token" else "route"
             message = f"Denied: {tool_name}"
-            # Record the failure audit (journey stops at 'auth' or 'route').
-            await record_call_failure(
-                token_info=token_info,
-                mcp_name=tool_name,
+            # 单次 XADD 记录失败审计：message + journey 进 stream，
+            # 消费者落 MySQL 时失败面板的「错误信息 / 查看轨迹」直接可用
+            await record_call_stream(
+                meta=build_audit_meta(token_info, tool_name, latency_ms, trace_id),
+                status="fail",
                 error_type=error_type,
-                message=message,
-                latency_ms=latency_ms,
-                trace_id=trace_id,
-                fail_stage=fail_stage,
-            )
-            # 双写：Redis failures 流 + MySQL calls 表（失败条目两处都记）。
-            # MySQL 行带上 message+journey：失败面板已改读 calls 表，
-            # 前端「查看轨迹」依赖行内 journey 字段
-            await record_call_audit(
-                token_info, tool_name, latency_ms, trace_id, "fail", error_type,
                 message=message,
                 journey=build_journey(fail_stage, _resolve_server_name(tool_name), latency_ms),
             )
@@ -168,18 +161,10 @@ class PermissionMiddleware(Middleware):
             err_type = classify_error(exc)
             fail_stage = tool_name.split("_", 1)[0] if "_" in tool_name else "backend"
             message = str(exc)
-            await record_call_failure(
-                token_info=token_info,
-                mcp_name=tool_name,
+            await record_call_stream(
+                meta=build_audit_meta(token_info, tool_name, latency_ms, trace_id),
+                status="fail",
                 error_type=err_type,
-                message=message,
-                latency_ms=latency_ms,
-                trace_id=trace_id,
-                fail_stage=fail_stage,
-            )
-            # 双写：Redis failures 流 + MySQL calls 表（含 message+journey，同上）
-            await record_call_audit(
-                token_info, tool_name, latency_ms, trace_id, "fail", err_type,
                 message=message,
                 journey=build_journey(fail_stage, _resolve_server_name(tool_name), latency_ms),
             )
@@ -195,8 +180,14 @@ class PermissionMiddleware(Middleware):
         if observability.REQUEST_LATENCY:
             observability.REQUEST_LATENCY.record(latency_ms / 1000.0)
 
-        # 成功也写 calls 表：请求日志页需要全量调用明细（不止失败）
-        await record_call_audit(token_info, tool_name, latency_ms, trace_id, "ok")
+        # 成功也写流：请求日志页需要全量调用明细（不止失败）
+        await record_call_stream(
+            meta=build_audit_meta(token_info, tool_name, latency_ms, trace_id),
+            status="ok",
+            error_type=None,
+            message="",
+            journey=[],
+        )
 
         return result
 

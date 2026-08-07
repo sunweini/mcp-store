@@ -122,8 +122,8 @@ async def test_middleware_denies_missing_token(fake_redis, monkeypatch):
     with pytest.raises(ToolError):
         await mw.on_call_tool(ctx, call_next)
 
-    # Verify an audit failure was written.
-    entries = await fake_redis.xrange("audit:failures")
+    # Verify an audit failure was written to the audit:calls stream.
+    entries = await fake_redis.xrange("audit:calls")
     assert len(entries) == 1
     _, fields = entries[0]
     assert fields["error_type"] == "invalid_token"
@@ -155,7 +155,7 @@ async def test_middleware_denies_wrong_permission(fake_redis, monkeypatch):
     with pytest.raises(ToolError):
         await mw.on_call_tool(ctx, call_next)
 
-    entries = await fake_redis.xrange("audit:failures")
+    entries = await fake_redis.xrange("audit:calls")
     assert len(entries) == 1
     _, fields = entries[0]
     assert fields["error_type"] == "permission_denied"
@@ -185,7 +185,7 @@ async def test_middleware_verify_token_exception_treated_as_invalid(fake_redis, 
     with pytest.raises(ToolError):
         await mw.on_call_tool(ctx, call_next)
 
-    entries = await fake_redis.xrange("audit:failures")
+    entries = await fake_redis.xrange("audit:calls")
     assert len(entries) == 1
     _, fields = entries[0]
     assert fields["error_type"] == "invalid_token"
@@ -220,7 +220,7 @@ async def test_middleware_records_backend_failure(fake_redis, monkeypatch):
     with pytest.raises(httpx.TimeoutException):
         await mw.on_call_tool(ctx, call_next)
 
-    entries = await fake_redis.xrange("audit:failures")
+    entries = await fake_redis.xrange("audit:calls")
     assert len(entries) == 1
     _, fields = entries[0]
     assert fields["error_type"] == "upstream_timeout"
@@ -446,10 +446,13 @@ async def test_list_tools_no_underscore_tool_skipped(fake_redis, monkeypatch):
     assert names == {"zabbix_list_active_problems", "zabbix_create_maintenance"}
 
 
-# ─── on_call_tool 写 MySQL calls ─────────────────────────────────
+# ─── on_call_tool 写 audit:calls 流 ───────────────────────────────
+# 审计单流化后，三条路径（成功/拒绝/异常）各一次 XADD：成功行 message/journey
+# 留空，失败行带 message（错误文案）+ journey（轨迹），供消费者落库后
+# 请求日志页 / 失败面板直接展示
 
 async def test_call_success_writes_calls(fake_redis, monkeypatch):
-    """成功调用 -> record_call 被调一次 status=ok。"""
+    """成功调用 -> audit:calls 写一条 status=ok。"""
     from auth import hash_token
     await fake_redis.hset(
         f"tokens:{hash_token('tok_ok')}",
@@ -458,82 +461,72 @@ async def test_call_success_writes_calls(fake_redis, monkeypatch):
     )
     monkeypatch.setattr("permission_middleware.get_http_headers",
                         lambda include=None: {"authorization": "Bearer tok_ok"})
-    calls = []
-    async def fake_record_call(meta, status, error_type=None, message=None, journey=None):
-        calls.append((meta, status, error_type))
-    monkeypatch.setattr("middleware.record_call", fake_record_call)
 
     async def call_next(ctx): return "result"
     await PermissionMiddleware().on_call_tool(FakeContext("zabbix_list_active_problems"), call_next)
 
-    assert len(calls) == 1
-    meta, status, _ = calls[0]
-    assert status == "ok"
-    assert meta["server"] == "zabbix"
-    assert meta["tool"] == "list_active_problems"
-    assert meta["token_name"] == "caller"
+    entries = await fake_redis.xrange("audit:calls", count=1)
+    assert len(entries) == 1
+    msg = entries[0][1]
+    assert msg["status"] == "ok"
+    assert msg["server"] == "zabbix"
+    assert msg["tool"] == "list_active_problems"
+    assert msg["token_name"] == "caller"
 
 
 async def test_call_denied_writes_calls_fail(fake_redis, monkeypatch):
-    """权限拒绝 -> record_call status=fail + error_type，且 record_failure 仍调（Redis）。"""
+    """权限拒绝 -> audit:calls 一条 status=fail + invalid_token。"""
     monkeypatch.setattr("permission_middleware.get_http_headers",
                         lambda include=None: {})  # 无 token
-    calls = []
-    async def fake_record_call(meta, status, error_type=None, message=None, journey=None):
-        calls.append((status, error_type))
-    monkeypatch.setattr("middleware.record_call", fake_record_call)
-
     from fastmcp.exceptions import ToolError
     with pytest.raises(ToolError):
         await PermissionMiddleware().on_call_tool(
             FakeContext("zabbix_list_active_problems"), lambda ctx: "x")
-    assert calls == [("fail", "invalid_token")]
+    entries = await fake_redis.xrange("audit:calls", count=1)
+    msg = entries[0][1]
+    assert msg["status"] == "fail"
+    assert msg["error_type"] == "invalid_token"
 
 
 async def test_call_exception_writes_calls_fail(fake_redis, monkeypatch):
-    """后端异常 -> record_call status=fail + upstream_error。"""
+    """后端异常 -> audit:calls 一条 status=fail + upstream_error。"""
     from auth import hash_token
     await fake_redis.hset(f"tokens:{hash_token('tok_rw')}",
         mapping={"id": "t2", "name": "c2", "permissions": '{"zabbix": {"read": true, "write": true}}'})
     monkeypatch.setattr("permission_middleware.get_http_headers",
                         lambda include=None: {"authorization": "Bearer tok_rw"})
-    calls = []
-    async def fake_record_call(meta, status, error_type=None, message=None, journey=None):
-        calls.append((status, error_type))
-    monkeypatch.setattr("middleware.record_call", fake_record_call)
 
     async def call_next(ctx): raise RuntimeError("backend down")
     with pytest.raises(RuntimeError):
         await PermissionMiddleware().on_call_tool(
             FakeContext("zabbix_create_maintenance"), call_next)
-    assert calls == [("fail", "upstream_error")]
+    entries = await fake_redis.xrange("audit:calls", count=1)
+    msg = entries[0][1]
+    assert msg["status"] == "fail"
+    assert msg["error_type"] == "upstream_error"
 
 
-# ─── on_call_tool 失败路径：MySQL 行带 message + journey ──────────
-# 失败面板改读 calls 表后，前端错误信息来自 message 列、「查看轨迹」来自
-# journey 列；两列必须由拒绝/异常两条失败路径写入
+# ─── on_call_tool 失败路径：stream 条目带 message + journey ────────
+# 失败面板数据来自消费者的 message/journey 列；两列必须由拒绝/异常两条
+# 失败路径写入 stream（消费者原样落库）
 
 
 async def test_call_denied_mysql_row_has_message_and_journey(fake_redis, monkeypatch):
-    """拒绝路径：MySQL 行含 message=Denied 文案 + journey（auth 段 fail）。"""
+    """拒绝路径：条目含 message=Denied 文案 + journey（auth 段 fail）。"""
     monkeypatch.setattr("permission_middleware.get_http_headers",
                         lambda include=None: {})  # 无 token -> invalid_token
-    rows = []
-    async def fake_record_call(meta, status, error_type=None, message=None, journey=None):
-        rows.append({"meta": meta, "status": status, "error_type": error_type,
-                     "message": message, "journey": journey})
-    monkeypatch.setattr("middleware.record_call", fake_record_call)
 
     from fastmcp.exceptions import ToolError
     with pytest.raises(ToolError):
         await PermissionMiddleware().on_call_tool(
             FakeContext("zabbix_list_active_problems"), lambda ctx: "x")
 
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["status"] == "fail"
-    assert row["message"] == "Denied: zabbix_list_active_problems"
-    journey = row["journey"]
+    entries = await fake_redis.xrange("audit:calls", count=1)
+    msg = entries[0][1]
+    assert msg["status"] == "fail"
+    assert msg["message"] == "Denied: zabbix_list_active_problems"
+    import json
+    journey = json.loads(msg["journey"])
     assert isinstance(journey, list) and len(journey) == 5
     # invalid_token -> fail_stage=auth：auth 段 fail，route/backend skip
     assert journey[2]["stage"] == "auth"
@@ -543,29 +536,25 @@ async def test_call_denied_mysql_row_has_message_and_journey(fake_redis, monkeyp
 
 
 async def test_call_exception_mysql_row_has_message_and_journey(fake_redis, monkeypatch):
-    """异常路径：MySQL 行含 message=异常文案 + journey（后端段 fail）。"""
+    """异常路径：条目含 message=异常文案 + journey（后端段 fail）。"""
     from auth import hash_token
     await fake_redis.hset(f"tokens:{hash_token('tok_rw2')}",
         mapping={"id": "t3", "name": "c3", "permissions": '{"zabbix": {"read": true, "write": true}}'})
     monkeypatch.setattr("permission_middleware.get_http_headers",
                         lambda include=None: {"authorization": "Bearer tok_rw2"})
-    rows = []
-    async def fake_record_call(meta, status, error_type=None, message=None, journey=None):
-        rows.append({"status": status, "error_type": error_type,
-                     "message": message, "journey": journey})
-    monkeypatch.setattr("middleware.record_call", fake_record_call)
 
     async def call_next(ctx): raise RuntimeError("backend down")
     with pytest.raises(RuntimeError):
         await PermissionMiddleware().on_call_tool(
             FakeContext("zabbix_create_maintenance"), call_next)
 
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["status"] == "fail"
-    assert row["error_type"] == "upstream_error"
-    assert row["message"] == "backend down"
-    journey = row["journey"]
+    entries = await fake_redis.xrange("audit:calls", count=1)
+    msg = entries[0][1]
+    assert msg["status"] == "fail"
+    assert msg["error_type"] == "upstream_error"
+    assert msg["message"] == "backend down"
+    import json
+    journey = json.loads(msg["journey"])
     assert isinstance(journey, list) and len(journey) == 5
     # 后端异常 -> fail_stage=server 前缀：前 4 段 ok，zabbix 段 fail 带总耗时
     assert [s["state"] for s in journey] == ["ok", "ok", "ok", "ok", "fail"]

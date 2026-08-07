@@ -20,11 +20,12 @@ PROMETHEUS_PORT = int(os.environ.get("PROMETHEUS_PORT", "9464"))
 REQUESTS_TOTAL = None
 REQUEST_LATENCY = None
 AUTH_FAILURES = None
+AUDIT_DROPPED_TOTAL = None
 
 
 def init_telemetry(service_name: str = "mcp-gateway") -> None:
     """Configure OTel traces + Prometheus metrics. Safe to call once at startup."""
-    global REQUESTS_TOTAL, REQUEST_LATENCY, AUTH_FAILURES
+    global REQUESTS_TOTAL, REQUEST_LATENCY, AUTH_FAILURES, AUDIT_DROPPED_TOTAL
 
     resource = Resource.create({
         "service.name": os.environ.get("OTEL_SERVICE_NAME", service_name),
@@ -55,6 +56,7 @@ def init_telemetry(service_name: str = "mcp-gateway") -> None:
         REQUESTS_TOTAL = meter.create_counter("gateway_requests_total", description="Total MCP requests")
         REQUEST_LATENCY = meter.create_histogram("gateway_request_duration_seconds", description="Request latency")
         AUTH_FAILURES = meter.create_counter("gateway_auth_failures_total", description="Auth failures")
+        AUDIT_DROPPED_TOTAL = meter.create_counter("audit_dropped_total", description="Audit stream XADD failures")
         logger.info("metrics_configured", service=service_name, port=PROMETHEUS_PORT)
     except Exception as exc:
         # Catch OSError (port conflict on Linux/Docker) AND ImportError (missing

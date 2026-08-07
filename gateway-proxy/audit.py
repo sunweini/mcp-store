@@ -1,15 +1,11 @@
-"""Failure audit: double-write Redis Stream + MySQL.
+"""Failure audit: proxy 只 XADD audit:calls stream，MySQL 落库在 admin 消费者。
 
-The proxy writes one entry per failed request to the audit:failures Redis
-Stream (kept as a double-write/rollback fallback) AND a status=fail row to the
-MySQL calls table (with message + journey). The admin service now reads the
-failure feed, trace view, aggregates and detail from MySQL calls -- the Redis
-stream is retained only for compatibility/rollback, not as the primary source.
+改造前 proxy 同步写 MySQL calls 表 + Redis audit:failures 双写；现在 MySQL
+完全移出请求路径（D1/D3）——单流 audit:calls 承载成功+失败全量，消费者
+（gateway-admin）XREADGROUP 批量落库。XADD 失败仅日志+指标（D4 审计可丢）。
 """
-import json
 import structlog
 from redis_client import get_redis
-from db import get_pool
 
 logger = structlog.get_logger()
 
@@ -22,78 +18,42 @@ ERROR_TYPES = frozenset({
     "connection_error",
 })
 
-# MAXLEN trims the stream so it cannot grow unbounded.
-_STREAM_MAXLEN = 10000
+_STREAM = "audit:calls"
+# MAXLEN trims the stream so it cannot grow unbounded (R9: 50000 条 = 千级 QPS 下 50s 缓冲)
+_STREAM_MAXLEN = 50000
 
 
-async def record_failure(
-    journey: list[dict],
-    error_type: str,
+async def record_call_stream(
     meta: dict,
+    status: str,
+    error_type: str | None = None,
+    message: str | None = None,
+    journey: list | None = None,
 ) -> None:
-    """Append a failure record to the audit:failures Redis Stream.
-
-    Redis 流现为双写/回滚兜底——admin 失败面板/聚合/明细均改读 MySQL calls 表
-    （status=fail 行，含 message+journey）。保留此写仅为兼容与回滚。
-
-    journey: [{stage, state, ms}, ...] - state is ok|fail|skip
-    error_type: one of ERROR_TYPES
-    meta: {trace_id, server, tool, op, message, latency_ms, token_name, time}
-    """
+    """Append one audit record to audit:calls stream. Never raises (D4)."""
     r = get_redis()
     try:
         await r.xadd(
-            "audit:failures",
+            _STREAM,
             {
-                "trace": meta["trace_id"],
+                "time": meta["time"],
                 "server": meta["server"],
                 "tool": meta["tool"],
                 "op": meta["op"],
-                "error_type": error_type,
-                "message": meta["message"],
-                "latency_ms": meta["latency_ms"],
-                "token_name": meta.get("token_name", ""),
-                "time": meta["time"],
-                "journey": json.dumps(journey),
+                "token_name": meta["token_name"],
+                "latency_ms": str(meta["latency_ms"]),
+                "status": status,
+                "error_type": error_type or "",
+                "message": message or "",
+                "journey": __import__("json").dumps(journey or []),
+                "trace": meta["trace_id"],
             },
             maxlen=_STREAM_MAXLEN,
             approximate=True,
         )
     except Exception as e:
-        # NOTE: audit must never break the request path; log and continue.
-        logger.error("audit_write_failed", error=str(e), service="gateway-proxy")
-
-
-async def record_call(
-    meta: dict,
-    status: str,
-    error_type: str | None = None,
-    message: str | None = None,
-    journey: list | str | None = None,
-) -> None:
-    """INSERT 调用记录到 MySQL calls 表。旁路：失败仅记日志不阻断。
-
-    message/journey 仅失败行非空（on_call_tool 失败路径写入），
-    供 admin 失败面板展示错误信息与请求轨迹；成功行留空默认值。
-    """
-    # journey 传入 list（build_journey 产物）时序列化为 JSON 字符串入 TEXT 列；
-    # 已是字符串则原样用，缺省落 '[]' 保证前端 json.loads 不炸
-    if isinstance(journey, list):
-        journey_str = json.dumps(journey)
-    else:
-        journey_str = journey or "[]"
-    try:
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "INSERT INTO calls (time, server, tool, op, token_name, "
-                    "latency_ms, status, error_type, trace, message, journey) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                    (meta["time"], meta["server"], meta["tool"], meta["op"],
-                     meta["token_name"], meta["latency_ms"], status,
-                     error_type or "", meta["trace_id"],
-                     message or "", journey_str),
-                )
-    except Exception as e:
-        logger.error("audit_call_write_failed", error=str(e), service="gateway-proxy")
+        # 审计绝不断请求路径；失败计入 audit_dropped_total 指标（observability 模块运行时取值）
+        import observability
+        if observability.AUDIT_DROPPED_TOTAL:
+            observability.AUDIT_DROPPED_TOTAL.add(1, {})
+        logger.error("audit_xadd_failed", error=str(e), service="gateway-proxy")
