@@ -60,6 +60,13 @@ async def _recompute_union(r, token_id: str, remaining: dict[str, dict]) -> None
         "write": any(v.get("write") for v in remaining.values()),
     }
     await r.hset(f"tokens:{token_hash}", "permissions", json.dumps(perms))
+    # 缓存失效通知：union 收紧（权限降低）必须即时广播 token:changed，
+    # 否则 proxy 本地 token 缓存最长 60s 才感知——吊销/变更即时是本方案的
+    # 核心约束（tokens.py create/delete 同款）。publish 失败仅 warning。
+    try:
+        await r.publish("token:changed", json.dumps({"token_hash": token_hash}))
+    except Exception as e:
+        logger.warning("token_publish_failed", error=str(e), service="gateway-admin")
 
 
 @router.get("/{token_id}")

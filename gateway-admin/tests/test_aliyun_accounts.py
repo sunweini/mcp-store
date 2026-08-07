@@ -169,8 +169,12 @@ async def test_delete_account_cleans_token_perms(no_probe, client, fake_redis, a
     assert "acct2" in remaining
 
 
-async def test_delete_account_resyncs_token_union(no_probe, client, fake_redis, auth_headers):
-    """删除唯一授权账户后，gateway token 的 server 级 union 同步归零（防权限残留）。"""
+async def test_delete_account_resyncs_token_union(no_probe, client, fake_redis, auth_headers, monkeypatch):
+    """删除唯一授权账户后，gateway token 的 server 级 union 同步归零（防权限残留）。
+
+    同时断言 publish 了 token:changed——union 归零 = 权限收紧，proxy 缓存
+    必须即时失效而非等 60s TTL（Review finding）。
+    """
     # 造 server + 账户 + token（aliyun-dns-mcp read+write）+ 授权 acct1(write)
     client.post("/api/servers", json={"name": "aliyun-dns-mcp",
                                       "url": "http://aliyun-dns-mcp:9054/mcp",
@@ -187,6 +191,10 @@ async def test_delete_account_resyncs_token_union(no_probe, client, fake_redis, 
     perms = json.loads((await fake_redis.hgetall(f"tokens:{token_hash}"))["permissions"])
     assert perms["aliyun-dns-mcp"] == {"read": True, "write": True}  # 前置：union 已开
 
+    publishes = []
+    async def counting_publish(channel, message):
+        publishes.append((channel, message))
+    monkeypatch.setattr(fake_redis, "publish", counting_publish)
     resp = client.delete("/api/aliyun-accounts/acct1", headers=auth_headers)
     assert resp.status_code == 204
     # 唯一授权被清空 → 授权映射 key 已删
@@ -194,6 +202,10 @@ async def test_delete_account_resyncs_token_union(no_probe, client, fake_redis, 
     # server 级 union 归零，与 GET perms 返回 {} 一致
     perms = json.loads((await fake_redis.hgetall(f"tokens:{token_hash}"))["permissions"])
     assert perms["aliyun-dns-mcp"] == {"read": False, "write": False}
+    # 权限收紧必须广播 token:changed（proxy 缓存即时失效）
+    token_changed = [m for ch, m in publishes if ch == "token:changed"]
+    assert len(token_changed) == 1
+    assert json.loads(token_changed[0]) == {"token_hash": token_hash}
 
 
 async def test_delete_account_union_keeps_other_accounts(no_probe, client, fake_redis, auth_headers):

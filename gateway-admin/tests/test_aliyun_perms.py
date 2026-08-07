@@ -89,3 +89,26 @@ async def test_put_perms_clear_all_removes_mapping(client, fake_redis, auth_head
     token_hash = await fake_redis.get(f"token_id:{token_id}")
     perms = json.loads((await fake_redis.hgetall(f"tokens:{token_hash}"))["permissions"])
     assert perms["aliyun-dns-mcp"] == {"read": False, "write": False}  # 全清 → 无权限
+
+
+def test_put_perms_publishes_token_changed(client, fake_redis, auth_headers, monkeypatch):
+    """put_perms 经 _recompute_union 改 token 权限后必须 publish token:changed。
+
+    否则 proxy 本地 token 缓存最长 60s 才感知权限收紧（违反"吊销/变更即时"
+    约束）。monkeypatch 放 seed 之后——create_server/create_token 也会
+    publish（server:changed / token:changed），只计 put_perms 自身的发布。
+    """
+    _seed_server(client, auth_headers)
+    _seed_account(client, auth_headers)
+    token_id = _seed_token(client, auth_headers)
+    publishes = []
+    async def counting_publish(channel, message):
+        publishes.append((channel, message))
+    monkeypatch.setattr(fake_redis, "publish", counting_publish)
+    resp = client.put(f"/api/aliyun-perms/{token_id}", json={
+        "permissions": {"acct1": {"read": True, "write": True}}}, headers=auth_headers)
+    assert resp.status_code == 200
+    token_changed = [m for ch, m in publishes if ch == "token:changed"]
+    assert len(token_changed) == 1
+    payload = json.loads(token_changed[0])
+    assert len(payload["token_hash"]) == 64  # sha256 hex

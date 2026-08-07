@@ -63,6 +63,8 @@ async def verify_token(token: str) -> dict | None:
     后最长 60s 生效，可接受）。
 
     Returns: {"id", "name", "permissions": {server: {read, write}}}
+    返回值是缓存内共享 dict（只读契约）：调用方不得原地修改，否则会
+    污染缓存——需要改权限语义时先 invalidate_token_cache 再重新 verify。
     """
     token_hash = hash_token(token)
     cached = _cache_get(token_hash)
