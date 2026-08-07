@@ -3,6 +3,24 @@
 # Usage: bash deploy.sh
 set -euo pipefail
 
+# ── 部署顺序（并发加固后必守）────────────────────────────
+# 审计消费者（XREADGROUP audit:calls → MySQL calls 表）运行在 gateway-admin。
+# proxy 对每次 tools/call（成功+失败）都 XADD audit:calls，且只在 Redis stream
+# 中暂存（MAXLEN 50000 滚动裁剪）——admin 未起时记录不落 MySQL。
+# 秒级断档不丢：消费者首启用 id="0" 建组（audit_consumer._run_consumer），
+# XREADGROUP ">" 从 stream 头补拉断档期间积压的全部消息，追平后转增量。
+# 真正丢审计只有一种情形：admin 长时间未起，stream 积压超过 50000 条被裁剪
+# （高压下 ~1 分钟即可能发生）。因此：
+#   1) 手工分步部署务必先 `docker compose up -d gateway-admin`，
+#      再 `docker compose up -d gateway-proxy`（admin 起来建组后 proxy 再写，
+#      零窗口）；顺序反了也只是秒级窗口（可追上），不是立即丢。
+#   2) 一键部署 `up -d --wait` 时，compose 按 depends_on 启动：
+#      redis → gateway-proxy → gateway-admin（proxy 依赖 redis；admin 依赖
+#      [redis, gateway-proxy]），proxy 先于 admin 启动 —— 秒级窗口可接受，
+#      但事后必须确认两个容器都在运行（restart: unless-stopped 已配置）。
+#   3) 验证：部署后跑 `bash deploy/verify_audit_pipeline.sh` 对账
+#      stream XLEN 与 calls 表 COUNT。
+
 DEPLOY_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$DEPLOY_DIR")"
 CONFIG_DIR="$DEPLOY_DIR/config"

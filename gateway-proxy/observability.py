@@ -24,7 +24,15 @@ AUDIT_DROPPED_TOTAL = None
 
 
 def init_telemetry(service_name: str = "mcp-gateway") -> None:
-    """Configure OTel traces + Prometheus metrics. Safe to call once at startup."""
+    """Configure OTel traces + Prometheus metrics. Safe to call once at startup.
+
+    OTEL_SDK_DISABLED=true 时直接跳过（压测/冒烟场景禁用 console span 导出，
+    避免每请求输出大 JSON 拖垮吞吐；instrument 保持 None，middleware 侧已
+    None-guard）。
+    """
+    if os.environ.get("OTEL_SDK_DISABLED", "").lower() == "true":
+        logger.info("telemetry_disabled", reason="OTEL_SDK_DISABLED", service=service_name)
+        return
     global REQUESTS_TOTAL, REQUEST_LATENCY, AUTH_FAILURES, AUDIT_DROPPED_TOTAL
 
     resource = Resource.create({
