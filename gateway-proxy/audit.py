@@ -1,4 +1,4 @@
-"""Failure audit: proxy 只 XADD audit:calls stream，MySQL 落库在 admin 消费者。
+"""Audit (success + failure): proxy 只 XADD audit:calls stream，MySQL 落库在 admin 消费者。
 
 改造前 proxy 同步写 MySQL calls 表 + Redis audit:failures 双写；现在 MySQL
 完全移出请求路径（D1/D3）——单流 audit:calls 承载成功+失败全量，消费者

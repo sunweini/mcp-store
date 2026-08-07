@@ -48,9 +48,10 @@ Dockerfile 用 `uv sync --frozen --no-dev`（lock 决定依赖；Docker 层缓�
 
 开发本 MCP 时，遇到 API 不确定必须先查知识库：
 - 根目录 `knowledge-base/fastmcp-v4/` — FastMCP v4 完整文档（写代码前必读对应篇目，触发规则见根 CLAUDE.md）
-- `knowledge-base/search-mcp-key-pool-pattern.md` — **多 API key 池设计模式**（本 MCP 需要多 key 管理时直接复用）
-- `knowledge-base/mcp-account-level-permission-pattern.md` — **账户级细粒度权限模式**（本 MCP 管理多个外部账户/租户且需要 token→账户授权时直接复用）
-- `knowledge-base/mcp-production-deployment-pitfalls.md` — 生产部署踩坑（网络/镜像/Redis 权限）
+- `knowledge-base/patterns/search-mcp-key-pool-pattern.md` — **多 API key 池设计模式**（本 MCP 需要多 key 管理时直接复用）
+- `knowledge-base/patterns/mcp-account-level-permission-pattern.md` — **账户级细粒度权限模式**（本 MCP 管理多个外部账户/租户且需要 token→账户授权时直接复用）
+- `knowledge-base/patterns/audit-async-stream-pattern.md` — **审计异步化模式**（网关/高并发写审计，proxy 只 XADD stream，消费者批量落库）
+- `knowledge-base/pitfalls/mcp-production-deployment-pitfalls.md` — 生产部署踩坑（网络/镜像/Redis 权限）
 
 ## Gateway 接入
 
@@ -200,15 +201,53 @@ headers = get_http_headers(include_all=True)   # 必须 include_all=True！
 若后端 API 生产网络直连不通（如 api.search.brave.com），用环境变量 `SEARCH_PROXY` 控制 httpx 代理，**不要硬编码**：
 
 ```python
-proxy = os.environ.get("SEARCH_PROXY") or None
-client = httpx.AsyncClient(timeout=10, proxy=proxy)
+# 共享 client 单例（C1）：连接池复用，proxy 在创建时配置一次
+_http_client: httpx.AsyncClient | None = None
+
+def get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(timeout=10, proxy=os.environ.get("SEARCH_PROXY") or None)
+    return _http_client
 ```
 
 部署时 compose 配 `${SEARCH_PROXY:-}`；admin 探活同源 API 也需同代理。
 
 ### 6. 多 API key 池（可选）
 
-若本 MCP 需要多 key 轮换/欠费剔除/配额告警/官方用量校准，**直接复用** `knowledge-base/search-mcp-key-pool-pattern.md` 的模式（Redis schema + 配额感知轮换 + 错误分类状态机 + 热更新自愈）。参考实现：tavily-mcp / brave-mcp / serpapi-mcp 的 `key_pool.py`。
+若本 MCP 需要多 key 轮换/欠费剔除/配额告警/官方用量校准，**直接复用** `knowledge-base/patterns/search-mcp-key-pool-pattern.md` 的模式（Redis schema + 配额感知轮换 + 错误分类状态机 + 热更新自愈）。参考实现：tavily-mcp / brave-mcp / serpapi-mcp 的 `key_pool.py`。
+
+## 并发与性能规范（必须）
+
+### C1. HTTP client 必须复用
+- 禁止每调用新建 httpx.AsyncClient（连接池重建 + TCP+TLS 握手每请求一次，实测为最大浪费）
+- 三种正确形态：
+  - 单后端 API：进程级单例 client（zabbix-mcp 样板）
+  - 多 key 池：共享 client + 请求级 `headers={"Authorization": f"Bearer {key}"}`（tavily-mcp 样板）
+  - SDK：按资源账户缓存 SDK client，凭证变化自动重建（aliyun-dns-mcp 样板）
+- **共享 client 禁止设默认 Authorization 头**（防 key 串用 R5）
+- per-request timeout（httpx 支持）替代每次新建 client 传 timeout
+- **共享单例仅限单事件循环进程**：get_shared_client 无锁（懒加载非 await），多事件循环（如测试中多次 asyncio.run/run_until_complete 各自开 loop）会各自建一份或跨 loop 复用冲突——生产单进程单 loop 安全，测试需注入 transport 自建 client
+
+### C2. 外呼必须有超时
+- 每个外部 API 调用必须有 timeout（默认 5s；长任务单独放宽）
+- 长任务用 semaphore 限制并发（默认 ≤5）
+
+### C3. 幂等重试必须带退避
+- 429/限流：指数退避（0.5s/1s）再重试；冷却 key 不立即重打
+- 非幂等操作禁止自动重试
+
+### C4. Redis 每请求往返必须合并
+- 热点路径（成功记账等）用 pipeline 合并多次写为一次往返
+- 禁止每请求 3+ 次独立 Redis 命令
+
+### C5. 共享状态必须考虑并发
+- key 池等有状态组件：单实例内 asyncio.Lock（锁绝不包外呼 await，否则串行化背压失效）+ 借用语义（选择时扣减 in-flight，用完归还）
+- 多实例需 Redis 原子操作（Lua）——单实例锁只保护本进程
+
+### C6. pubsub 监听必须自愈
+- 断线重建订阅（aclose → pubsub() → subscribe），禁止"断了只能重启容器"
+- 多频道订阅复用同一条 pubsub 连接（redis-py 支持），自愈只维护一个连接
 
 ## Redis 通用坑（必读）
 

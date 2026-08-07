@@ -116,11 +116,11 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
         None，交给 _maybe_refresh_usage 周期兜底）。FakeClient 无
         remaining 时 getattr 兜底为 None。
 
-        finally 里 close：真实 TavilyClient 每次调用新建 httpx.AsyncClient，
-        用完即关防连接泄漏。关闭方法名是 close()——aclose 是 httpx.
-        AsyncClient 的方法，TavilyClient 上不存在（上轮错写 aclose，
-        导致 getattr 恒为 None、关闭从未执行，连接泄漏依旧）。FakeClient
-        无 close 时 getattr 兜底跳过。
+        finally 里 close：真实 TavilyClient 共享进程级 httpx 连接池
+        （tavily_client.get_shared_client，C1），close() 幂等——共享
+        client 进程级存活不关闭（close 内部判断非共享才 aclose），
+        测试注入的自建 client 由 close 归还有关权。FakeClient 无
+        close 时 getattr 兜底跳过。
         """
         client = factory(rec["key"], timeout)
         try:

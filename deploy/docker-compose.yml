@@ -53,9 +53,6 @@ services:
       - "9465:9465"
     env_file:
       - ./config/proxy.env
-      # MYSQL_URL 在 mysql.env 里（直接写好完整连接串，避免 compose
-      # environment 不从 env_file 插值 $MYSQL_PASSWORD 的问题）
-      - ./config/mysql.env
     environment:
       # 容器名互访: redis 服务名即 DNS 名
       REDIS_URL: redis://redis:6379/0
@@ -80,7 +77,9 @@ services:
       # 时走同一代理。不写在 environment——compose 中 environment 优先级
       # 高于 env_file,${SEARCH_PROXY:-} 空串会覆盖 proxy.env 的真实值
       - ./config/proxy.env
-      # MYSQL_URL 在 mysql.env 里（同 gateway-proxy）
+      # MYSQL_URL 在 mysql.env 里（直接写好完整连接串，避免 compose
+      # environment 不从 env_file 插值 $MYSQL_PASSWORD 的问题）；
+      # 审计异步化后仅 admin 消费者需要 MySQL，proxy 不读
       - ./config/mysql.env
     environment:
       REDIS_URL: redis://redis:6379/0

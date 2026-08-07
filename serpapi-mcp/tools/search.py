@@ -100,11 +100,11 @@ async def _call_with_pool(pool, tool_name: str, params: dict,
     async def _once(rec: dict) -> tuple:
         """Single attempt: returns (resp, exc); resp None on failure.
 
-        finally 里 close：真实 SerpapiClient 每次调用新建
-        httpx.AsyncClient，用完即关防连接泄漏。关闭方法名是 close()——
-        aclose 是 httpx.AsyncClient 的方法，SerpapiClient 上不存在
-        （tavily 上轮错写 aclose 导致 getattr 恒为 None、关闭从未执行）。
-        FakeClient 无 close 时 getattr 兜底跳过。
+        finally 里 close：真实 SerpapiClient 共享进程级 httpx 连接池
+        （serpapi_client.get_shared_client，C1），close() 幂等——共享
+        client 进程级存活不关闭（close 内部判断非共享才 aclose），
+        测试注入的自建 client 由 close 归还有关权。FakeClient 无
+        close 时 getattr 兜底跳过。
         """
         client = factory(rec["key"], DEFAULT_TIMEOUT)
         try:

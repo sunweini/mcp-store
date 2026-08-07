@@ -39,16 +39,16 @@ MCP Client -> gateway-proxy:8082 -> [zabbix-mcp:9053, tavily-mcp:9050, ...]
     - servers 注册        - calls 表（全量 tools/call）
     - tokens              - 聚合统计源（重启不丢）
     - key 池（search:keys）
-    - audit:failures（失败流）
+    - audit:calls（全量审计缓冲流）
 ```
 
 **两个核心服务：**
-- `gateway-proxy`：MCP 协议代理，Token 验证，读写权限控制，调用审计写 MySQL
-- `gateway-admin`：管理 API + Vue 3 前端（Server/Token/API Keys 管理、监控面板、请求日志）
+- `gateway-proxy`：MCP 协议代理，Token 验证，读写权限控制，调用审计 XADD 至 `audit:calls` stream（proxy 不直连 MySQL）
+- `gateway-admin`：管理 API + Vue 3 前端（Server/Token/API Keys 管理、监控面板、请求日志）+ 审计消费者（XREADGROUP 批量落库 MySQL）
 
 **两个存储：**
-- `Redis`：配置与状态（server 注册、token、key 池、失败审计流）--热数据低延迟
-- `MySQL`：调用审计日志（calls 表，全量 tools/call）--聚合统计与明细，持久化重启不丢
+- `Redis`：配置与状态（server 注册、token、key 池、audit:calls 审计缓冲流）--热数据低延迟
+- `MySQL`：调用审计日志（calls 表，全量 tools/call，由 admin 消费者写入）--聚合统计与明细，持久化重启不丢
 
 ### 接入 Gateway 流程
 
@@ -118,7 +118,7 @@ MCP Client -> gateway-proxy:8082 -> [zabbix-mcp:9053, tavily-mcp:9050, ...]
 | 9052 | serpapi-mcp | 搜索源（5 engines） |
 | 9053 | zabbix-mcp | 告警巡检（8 tools） |
 | 9054 | aliyun-dns-mcp | 阿里云 DNS 解析管理（6 tools） |
-| 6379 | redis | 配置/状态/失败审计（容器内，不映射宿主） |
+| 6379 | redis | 配置/状态/audit:calls 审计缓冲流（容器内，不映射宿主） |
 | 3306 | mysql | 调用审计 calls 表（容器内，不映射宿主） |
 
 - MCP server / redis / mysql 容器内端口**不映射宿主端口**（与 gateway-proxy 8082 / gateway-admin 8081 分离，减少攻击面）
@@ -242,5 +242,6 @@ uv run python client.py   # 验证
 | **工具组织** | 模块级函数 + 显式具名 register 包装 | FastMCP v4 拒绝 `*args/**kwargs` 包装（实测） |
 | **key 安全** | 明文 key 禁入日志/metric label | URL query key（如 serpapi）防 httpx 日志泄漏 |
 | **可观测性** | structlog + OTel | 遵循 `~/.claude/docs/observability-coding-standards.md` |
+| **并发规范** | 复用 client/超时/退避/pipeline/借用/pubsub 自愈 | 详细见 templates/mcp-template/CLAUDE.md「并发与性能规范」|
 | **代码注释** | 写"为什么"不写"做了什么" | OBS-CORE-005 |
 

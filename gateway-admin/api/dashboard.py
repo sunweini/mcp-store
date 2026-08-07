@@ -1,8 +1,8 @@
 """Dashboard API: metrics + failures 均读 MySQL calls 表。
 
 Metrics aggregate from MySQL calls table (survives restart). Failures 面板
-也改读 calls 表（status='fail'），与总请求数同源一致；Redis audit:failures
-流仍由 proxy 双写，仅作回滚兜底，admin 不再读。
+也改读 calls 表（status='fail'），与总请求数同源一致。calls 表由审计
+消费者（audit_consumer.py）XREADGROUP audit:calls 批量落库，本模块只读。
 """
 import json
 from datetime import datetime, timedelta

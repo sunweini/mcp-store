@@ -1,8 +1,9 @@
-"""MCP middleware: permission enforcement + failure audit + metrics.
+"""MCP middleware: permission enforcement + audit (XADD audit:calls) + metrics.
 
 PermissionMiddleware runs on every tools/call: verifies the token, parses
 the namespace prefix, and checks read/write. Denied calls are recorded as
-audit failures and never reach the backend.
+audit failures and never reach the backend. 所有调用（成功+失败）统一
+XADD audit:calls stream（audit.py），MySQL 落库在 admin 消费者。
 
 NOTE: FastMCP middleware uses on_message(context, call_next). The token is
 read from the Authorization header (parsed in server.py and stashed on the

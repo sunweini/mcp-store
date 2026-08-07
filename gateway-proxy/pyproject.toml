@@ -16,7 +16,6 @@ dependencies = [
     "opentelemetry-sdk",
     "opentelemetry-exporter-otlp-proto-grpc",
     "opentelemetry-exporter-prometheus",
-    "aiomysql>=0.2",
 ]
 
 [project.optional-dependencies]
