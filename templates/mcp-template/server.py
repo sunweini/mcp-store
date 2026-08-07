@@ -13,8 +13,10 @@ from mcp.types import ToolAnnotations
 # ── Configuration ────────────────────────────────────────────────
 # NOTE: MCP_PORT 必须用根 CLAUDE.md 端口表登记的最小未用端口（9050-9500），
 # 不要默认 8000——容器内端口规范统一，登记后再开发。
+# 默认 9050 而非占位符：占位（如 "905x"）会让 import server 的测试在
+# int() 处 ValueError（实测），且默认值本就会被登记值覆盖。
 HOST = os.environ.get("MCP_HOST", "0.0.0.0")
-PORT = int(os.environ.get("MCP_PORT", "905x"))  # TODO: 登记端口后改实际值
+PORT = int(os.environ.get("MCP_PORT", "9050"))  # TODO: 登记端口后改实际值
 
 logger = structlog.get_logger()
 

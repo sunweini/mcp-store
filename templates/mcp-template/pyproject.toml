@@ -1,5 +1,9 @@
 [tool.uv]
 prerelease = "allow"
+# 无包目录（package=false, virtual 模式）：模板 MCP 是脚本 + tools/ 目录运行方式，
+# 不发布为 Python 包——不设则 hatchling 无法推断 files-to-ship，uv sync 直接失败
+# （实测）。若 MCP 需要真实包结构，删此行并加 [tool.hatch.build.targets.wheel] packages
+package = false
 
 [project]
 name = "{{mcp-name}}"
@@ -23,7 +27,12 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "fakeredis>=2.20",
 ]
+
+[tool.pytest.ini_options]
+# pytest-asyncio 1.x 默认 strict 模式：async fixture/测试无事件循环工厂全量报错
+asyncio_mode = "auto"
 
 [build-system]
 requires = ["hatchling"]

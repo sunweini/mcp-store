@@ -49,6 +49,7 @@ Dockerfile 用 `uv sync --frozen --no-dev`（lock 决定依赖；Docker 层缓�
 开发本 MCP 时，遇到 API 不确定必须先查知识库：
 - 根目录 `knowledge-base/fastmcp-v4/` — FastMCP v4 完整文档（写代码前必读对应篇目，触发规则见根 CLAUDE.md）
 - `knowledge-base/search-mcp-key-pool-pattern.md` — **多 API key 池设计模式**（本 MCP 需要多 key 管理时直接复用）
+- `knowledge-base/mcp-account-level-permission-pattern.md` — **账户级细粒度权限模式**（本 MCP 管理多个外部账户/租户且需要 token→账户授权时直接复用）
 - `knowledge-base/mcp-production-deployment-pitfalls.md` — 生产部署踩坑（网络/镜像/Redis 权限）
 
 ## Gateway 接入
@@ -136,6 +137,20 @@ OPERATION_TOTAL = Counter("{{mcp_name}}_operations_total", "Total operations", [
 **关键约束**：
 - key_id / 明文 API key **禁止**入日志与 metric label（高基数 + 敏感，OBS-CORE-003）
 - API key 走 URL query 的源（如 serpapi）要防 httpx INFO 日志泄漏完整 URL——把 httpx logger 提到 WARNING
+- **指标必须运行时取值**（tools/__init__.py 头部 CRITICAL 注释）：`from telemetry import X` 在模块加载瞬间（init_telemetry 之前）把指标绑定为 None，之后 init_telemetry 只更新 telemetry 模块自身——tool 级指标静默失效。必须 `import telemetry` 后运行时访问 `telemetry.REQUESTS_TOTAL` 等（aliyun-dns-mcp 实测，tests/test_metrics.py 有 monkeypatch 回归）
+- **日志注入 trace_id/span_id**（OBS-CORE-002）：_configure_logging 的 processor 链必须含 add_trace_context（从当前 OTel span 提取，zabbix-mcp/server.py 有实现）——否则声明与实现不符
+- **span exception event 手动记录**：`start_as_current_span` 默认 `record_exception=True`——with 块未捕获异常退出时 SDK 自动 record_exception，自动事件 stacktrace 含 `raise ... from exc` 原始异常链（网络异常消息带完整 URL query 会泄漏凭证）。必须显式关掉（`record_exception=False, set_status_on_exception=False`），敏感路径用 `add_event` 只写类型名 + 剥离后消息，其余路径保留 `record_exception`（aliyun-dns-mcp 实测）
+
+### 2.5 依赖注入（需要时）
+
+工具函数里拿当前请求的 HTTP headers（如 token 验证）用 `fastmcp.server.dependencies.get_http_headers`：
+
+```python
+from fastmcp.server.dependencies import get_http_headers
+headers = get_http_headers(include_all=True)   # 必须 include_all=True！
+```
+
+**坑**：`get_http_headers()` 默认**排除 authorization 头**（`include_all: bool = False` 签名，默认剥离 hop-by-hop/proxy 头），漏传 `include_all=True` 则 token 校验恒失败。测试用 monkeypatch 该函数回归（aliyun-dns-mcp tests/test_auth.py）。
 
 ### 3. 注册到 Gateway
 
