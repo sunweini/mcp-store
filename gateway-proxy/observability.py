@@ -29,6 +29,9 @@ def init_telemetry(service_name: str = "mcp-gateway") -> None:
     OTEL_SDK_DISABLED=true 时直接跳过（压测/冒烟场景禁用 console span 导出，
     避免每请求输出大 JSON 拖垮吞吐；instrument 保持 None，middleware 侧已
     None-guard）。
+    ⚠️ 防未来踩坑：本守卫早退时 instruments（REQUESTS_TOTAL 等）保持 None。
+    若未来某调用点忘记 None-guard，此处会造成静默 None 调用——新增 instrument
+    使用处必须带 None 检查。
     """
     if os.environ.get("OTEL_SDK_DISABLED", "").lower() == "true":
         logger.info("telemetry_disabled", reason="OTEL_SDK_DISABLED", service=service_name)

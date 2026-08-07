@@ -18,6 +18,16 @@ COMPOSE_FILE="/opt/mcp-gateway-cfg/deploy/docker-compose.yml"
 REDIS_CID="docker ps --filter name=redis -q"
 MYSQL_CID="docker ps --filter name=mysql -q"
 
+# 前置：host 不可达/无密钥时给明确报错（不然后续每步 SSH 失败 + set -e
+# 会以半截输出含糊退出；BatchMode 防止密码提示挂起）
+if ! ssh "${SSHOPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$HOST" true 2>/dev/null; then
+  # 注意 ${HOST} 大括号必须写：bash 3.2 (macOS 默认) 在 UTF-8 locale 下
+  # 会把紧随 $HOST 的中文字节吞进变量名（$HOST无法连接 → HOST\xe6... 未绑定）
+  echo "FAIL: 无法连接 ${HOST}（host 不可达 / SSH 认证失败 / 端口 $PORT 不通）"
+  echo "       检查: ssh ${SSHOPTS[*]} ${HOST} 能否手工登录；SSH_KEY 环境变量是否正确"
+  exit 1
+fi
+
 echo "[1/5] 检查容器状态"
 STATUS=$(SSH "docker compose -f $COMPOSE_FILE ps --format '{{.Service}} {{.State}}'" || true)
 FAIL=0
@@ -34,8 +44,12 @@ done
 echo "[2/5] 检查审计 stream（XADD 侧，gateway-proxy 写入）"
 XLEN=$(SSH "docker exec \$( $REDIS_CID ) redis-cli XLEN audit:calls" | tr -d '\r')
 echo "  audit:calls XLEN = ${XLEN:-0}（MAXLEN 50000 滚动裁剪）"
-if [ "${XLEN:-0}" -lt 0 ] 2>/dev/null || ! echo "$XLEN" | grep -qE '^[0-9]+$'; then
-  echo "  FAIL: 无法读取 XLEN（redis 容器或 stream 异常）"
+# 单一正则校验：空串/非数字（SSH 失败、redis 容器不在、redis-cli 报错）
+# 一律判 FAIL。注意不能把比较放前面——`[ "" -lt 0 ]` 在 set -e 下 exit 2
+# 会让脚本当场退出，或 2>/dev/null 吞错后落入错误分支，两类都不该发生。
+if [[ ! "${XLEN:-0}" =~ ^[0-9]+$ ]] || [ "${XLEN:-0}" -lt 0 ]; then
+  echo "  FAIL: 无法读取 XLEN（SSH 失败 / redis 容器未运行 / stream 异常）"
+  echo "        远端输出: ${XLEN:-(空)}"
   exit 1
 fi
 [ "${XLEN:-0}" -gt 0 ] || echo "  WARN: stream 为空 —— 暂无调用流量，可先人工触发一次工具调用再重跑"
@@ -43,6 +57,13 @@ fi
 echo "[3/5] 检查死信流（audit:calls:dead，应接近 0）"
 DEAD=$(SSH "docker exec \$( $REDIS_CID ) redis-cli XLEN audit:calls:dead" | tr -d '\r')
 echo "  audit:calls:dead XLEN = ${DEAD:-0}"
+# 与 XLEN 相同的数字校验：redis-cli 失败/非数字时明确报错，
+# 而非在 set -e 下含糊退出
+if [[ ! "${DEAD:-0}" =~ ^[0-9]+$ ]] || [ "${DEAD:-0}" -lt 0 ]; then
+  echo "  FAIL: 无法读取死信流 XLEN（SSH 失败 / redis 容器未运行 / stream 异常）"
+  echo "        远端输出: ${DEAD:-(空)}"
+  exit 1
+fi
 if [ "${DEAD:-0}" -gt 0 ]; then
   echo "  WARN: 死信非空 —— 存在落库失败批次，需查 gateway-admin 日志定位"
 fi
