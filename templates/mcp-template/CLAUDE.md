@@ -288,6 +288,13 @@ params["sortfield"] = "eventid"
 params["sortfield"] = "eventid"
 ```
 
+## 版本说明（必须）
+
+**每次开发完成/发布收尾，必须同步修订根目录 `RELEASE.md`**：
+- 记录：变更内容、影响范围、部署注意事项、回滚方式
+- 版本号按 SemVer：MAJOR=breaking / MINOR=新功能 / PATCH=修复+文档
+- 禁止只改代码不记版本——版本记录是交付物的一部分
+
 ## 注意事项
 
 <!-- 开发中踩过的坑、特殊处理 -->

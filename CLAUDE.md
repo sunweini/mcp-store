@@ -244,4 +244,5 @@ uv run python client.py   # 验证
 | **可观测性** | structlog + OTel | 遵循 `~/.claude/docs/observability-coding-standards.md` |
 | **并发规范** | 复用 client/超时/退避/pipeline/借用/pubsub 自愈 | 详细见 templates/mcp-template/CLAUDE.md「并发与性能规范」|
 | **代码注释** | 写"为什么"不写"做了什么" | OBS-CORE-005 |
+| **版本说明** | 每次开发完成/发布收尾必修订根 `RELEASE.md`（变更内容/部署注意/回滚） | 版本记录是交付物的一部分，禁止只改代码不记版本 |
 
