@@ -9,11 +9,14 @@ import json
 import time
 import hashlib
 import secrets
+import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from auth import require_admin, mask_token
 from redis_client import get_redis
+
+logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/tokens", tags=["tokens"])
 
@@ -60,6 +63,12 @@ async def create_token(req: TokenCreate, _: str = Depends(require_admin)):
         "created_at": now,
     })
     await r.set(f"token_id:{token_id}", token_hash)
+    # 缓存失效通知：proxy 本地 token 缓存靠此即时失效（删除/变更不发布 =
+    # 吊销延迟 60s，安全漏洞）。publish 失败仅 warning——主操作已成功。
+    try:
+        await r.publish("token:changed", json.dumps({"token_hash": token_hash}))
+    except Exception as e:
+        logger.warning("token_publish_failed", error=str(e), service="gateway-admin")
     # plaintext returned ONCE here; never again retrievable
     return {
         "id": token_id,
@@ -100,4 +109,9 @@ async def delete_token(token_id: str, _: str = Depends(require_admin)):
     # 清理 aliyun-dns-mcp 账户授权映射，避免僵尸授权残留——MCP 侧有
     # 防御（账户不在 store 即拒绝），但清理保持数据整洁（spec §6.2）
     await r.delete(f"aliyndns:token_accounts:{token_id}")
+    # 缓存失效通知（同 create_token）：吊销即时生效，不等 60s TTL。
+    try:
+        await r.publish("token:changed", json.dumps({"token_hash": token_hash}))
+    except Exception as e:
+        logger.warning("token_publish_failed", error=str(e), service="gateway-admin")
     return None

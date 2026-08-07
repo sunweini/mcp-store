@@ -196,15 +196,25 @@ def _provider_namespace(provider) -> str | None:
 
 
 async def watch_changes(gateway) -> None:
-    """Subscribe to server:changed and hot-reload mounts. Runs forever."""
+    """订阅 server:changed + token:changed，热加载 server + 失效 token 缓存。
+
+    双频道复用同一条 pubsub 连接（redis-py 支持多频道 subscribe），
+    自愈逻辑只维护一个连接——避免第二条连接带来双倍断线面。
+    """
     r = get_redis()
     pubsub = r.pubsub()
-    await pubsub.subscribe("server:changed")
+    await pubsub.subscribe("server:changed", "token:changed")
     async for msg in pubsub.listen():
         if msg.get("type") != "message":
             continue
         # M1: isolate each event so one bad message can't kill hot-reload.
         try:
+            channel = msg.get("channel", "")
+            if channel == "token:changed":
+                from auth import invalidate_token_cache
+                data = json.loads(msg["data"])
+                invalidate_token_cache(data["token_hash"])
+                continue
             parsed = parse_change_event(msg["data"])
             if not parsed:
                 continue

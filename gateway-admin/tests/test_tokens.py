@@ -63,3 +63,48 @@ def test_delete_token(client, fake_redis, auth_headers):
     tok_id = r.json()["id"]
     resp = client.delete(f"/api/tokens/{tok_id}", headers=auth_headers)
     assert resp.status_code == 204
+
+
+# ─── token:changed 失效通知 ────────────────────────────────────
+
+def test_create_token_publishes_token_changed(client, fake_redis, auth_headers, monkeypatch):
+    """create_token 成功后 publish 一次 token:changed（缓存即时失效）。
+
+    monkeypatch 放在 server 创建之后：避免把 server:changed 也计入。
+    """
+    client.post("/api/servers", json={"name": "zabbix", "url": "http://x", "description": ""},
+                headers=auth_headers)
+    publishes = []
+    async def counting_publish(channel, message):
+        publishes.append((channel, message))
+    monkeypatch.setattr(fake_redis, "publish", counting_publish)
+    resp = client.post("/api/tokens", json={
+        "name": "ro", "permissions": {"zabbix": {"read": True, "write": False}},
+    }, headers=auth_headers)
+    assert resp.status_code == 201
+    assert len(publishes) == 1
+    channel, message = publishes[0]
+    assert channel == "token:changed"
+    payload = json.loads(message)
+    assert len(payload["token_hash"]) == 64  # sha256 hex
+
+
+def test_delete_token_publishes_token_changed(client, fake_redis, auth_headers, monkeypatch):
+    """delete_token 成功后 publish 一次 token:changed（吊销即时生效）。"""
+    publishes = []
+    async def counting_publish(channel, message):
+        publishes.append((channel, message))
+    monkeypatch.setattr(fake_redis, "publish", counting_publish)
+    client.post("/api/servers", json={"name": "zabbix", "url": "http://x", "description": ""},
+                headers=auth_headers)
+    r = client.post("/api/tokens", json={
+        "name": "ro", "permissions": {"zabbix": {"read": True, "write": False}},
+    }, headers=auth_headers)
+    publishes.clear()
+    tok_id = r.json()["id"]
+    resp = client.delete(f"/api/tokens/{tok_id}", headers=auth_headers)
+    assert resp.status_code == 204
+    assert len(publishes) == 1
+    channel, message = publishes[0]
+    assert channel == "token:changed"
+    assert len(json.loads(message)["token_hash"]) == 64
