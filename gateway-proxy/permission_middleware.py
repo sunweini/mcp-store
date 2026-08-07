@@ -190,8 +190,10 @@ class PermissionMiddleware(Middleware):
         # ── Call the backend（背压 + 总超时）───────────────────────
         # Task 4: 并发超出 semaphore 上限时排队（防止打爆后端连接池）；
         # wait_for 掐断超时请求（后端挂死不能无限拖住调用方）。
-        # semaphore 持有期间计入超时——排队时间也受总超时约束，避免
-        # 队列堆积时请求无限期等待。
+        # 为什么 wait_for 不包 semaphore acquire：排队时间不计入 90s
+        # 总超时——后端挂死 + 队列满时，排队请求的 deadline 由前端
+        # client 超时兜底（审查 Finding 2 定案）。只掐 semaphore 持有
+        # 期间（即真正打到后端）的请求，避免前端重试风暴二次压垮队列。
         server = _resolve_server_name(tool_name)
         sem = _get_semaphore(server or "unknown")
         timeout = _get_call_timeout(server)

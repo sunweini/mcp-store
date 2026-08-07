@@ -104,6 +104,10 @@ async def update_server(name: str, req: ServerUpdate, _: str = Depends(require_a
     mapping = {"url": req.url, "description": req.description}
     if req.call_timeout is not None:
         mapping["call_timeout"] = str(req.call_timeout)
+    else:
+        # call_timeout=None 语义是「清除自定义超时，恢复 proxy 默认 90s」——
+        # 只写不删会让 hash 残留旧值，proxy 永久沿用已改的超时（审查 Finding 1）
+        await r.hdel(f"servers:{name}", "call_timeout")
     await r.hset(f"servers:{name}", mapping=mapping)
     await _publish_change("update", name)
     return {"name": name, "url": req.url, "description": req.description,

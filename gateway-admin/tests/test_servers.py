@@ -90,6 +90,22 @@ async def test_update_server_call_timeout(client, fake_redis, auth_headers):
     assert float(await fake_redis.hget(f"servers:{name}", "call_timeout")) == 30
 
 
+async def test_update_server_call_timeout_cleared(client, fake_redis, auth_headers):
+    """call_timeout: null → hdel，hash 不留旧值（proxy 恢复默认 90s）。
+
+    审查 Finding 1：之前只写不删——设置过 45s 后传 null 不会删 hash
+    旧值，proxy 永久沿用 45s。
+    """
+    name = await _seed_server(fake_redis)
+    await fake_redis.hset(f"servers:{name}", mapping={"call_timeout": "45"})
+    resp = client.put(f"/api/servers/{name}", json={
+        "url": "http://new:9050/mcp", "description": "upd", "call_timeout": None,
+    }, headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["call_timeout"] is None
+    assert await fake_redis.hget(f"servers:{name}", "call_timeout") is None
+
+
 # ─── lifecycle（禁用/停用/启用）─────────────────────────────────
 
 async def _seed_server(fake_redis, name="srv-a"):
