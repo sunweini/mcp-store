@@ -3,6 +3,7 @@
 Serves the management API (/api/*) and the Vue 3 SPA (admin-ui/dist).
 Shares Redis with gateway-proxy; writes servers/tokens, proxy hot-reloads.
 """
+import asyncio
 import os
 from contextlib import asynccontextmanager
 
@@ -29,8 +30,18 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app):
     await ensure_default_admin()
+    # 审计消费者：XREADGROUP audit:calls → MySQL calls 表（Task 1 把 MySQL
+    # 移出 proxy 请求路径后由 admin 消费）。task 引用留 lifespan 局部变量即可
+    # —— 单 worker 容器（Dockerfile CMD 无 --workers），task 存活于事件循环。
+    import audit_consumer
+    consumer_task = asyncio.create_task(audit_consumer._run_consumer())
     logger.info("admin_started", service="gateway-admin")
     yield
+    consumer_task.cancel()
+    try:
+        await consumer_task
+    except asyncio.CancelledError:
+        pass
     from redis_client import close_redis
     await close_redis()
     logger.info("admin_stopped", service="gateway-admin")
