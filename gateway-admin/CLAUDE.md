@@ -11,7 +11,7 @@ MCP 网关管理面。FastAPI 管理 API（server/token/dashboard/calls）+ Vue 
 
 ## 审计消费者（2026-08 实施）
 - lifespan 启动 `audit_consumer._run_consumer()`：XREADGROUP batch=100/block=1s → executemany INSERT calls → XACK
-- 落库失败连续 3 次 → batch 移 `audit:calls:dead` 死信流（XACK 防无限重试）
+- 落库失败即移 `audit:calls:dead` 死信流（**每次失败即死信 + XACK，无重试累积**）
 - 查询只读 MySQL calls 表，禁读 Redis stream
 
 ## 本地开发

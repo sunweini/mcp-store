@@ -1,6 +1,6 @@
 # gateway-proxy
 
-MCP 网关代理。聚合后端 MCP server，提供 token 认证 + 读写权限控制 + 失败审计 + Prometheus metrics。
+MCP 网关代理。聚合后端 MCP server，提供 token 认证 + 读写权限控制 + 全量调用审计（XADD `audit:calls` stream）+ Prometheus metrics。
 
 ## 运行
 

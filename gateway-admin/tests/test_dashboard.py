@@ -204,8 +204,8 @@ def test_metrics_timeseries_server_filter(client, auth_headers, monkeypatch):
 
 
 # ── /api/failures (MySQL calls 表) ──
-# 失败面板数据源统一到 MySQL：与总请求/错误数同源。Redis 流仍由 proxy 双写，
-# admin 不再读（旧 Stream 测试随之移除）
+# 失败面板数据源统一到 MySQL：与总请求/错误数同源。calls 表由审计消费者
+# XREADGROUP audit:calls 批量落库，admin 只读 MySQL（旧 Stream 测试随之移除）
 
 def _fail_row(trace="abc", server="zabbix", tool="list", op="read",
               error_type="upstream_timeout", message="timeout",

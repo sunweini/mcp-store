@@ -168,7 +168,7 @@ class PermissionMiddleware(Middleware):
             latency_ms = int((time.monotonic() - start) * 1000)
             fail_stage = "auth" if error_type == "invalid_token" else "route"
             message = f"Denied: {tool_name}"
-            # 单次 XADD 记录失败审计：message + journey 进 stream，
+            # 单次 XADD 记录审计条目（含失败）：message + journey 进 stream，
             # 消费者落 MySQL 时失败面板的「错误信息 / 查看轨迹」直接可用
             await record_call_stream(
                 meta=build_audit_meta(token_info, tool_name, latency_ms, trace_id),

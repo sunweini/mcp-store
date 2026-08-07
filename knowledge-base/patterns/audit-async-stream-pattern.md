@@ -4,7 +4,7 @@
 网关/中间层需要全量调用审计，但同步写存储拖慢请求路径（QPS 千级时 MySQL INSERT 成瓶颈）。
 
 ## 架构
-proxy 只 XADD `audit:calls` stream（MAXLEN 50000，成功+失败全量）→ 消费者（独立进程/lifespan task）XREADGROUP batch=100/block=1s → executemany 批量 INSERT → XACK；连续失败 batch 移 `audit:calls:dead` 死信流。
+proxy 只 XADD `audit:calls` stream（MAXLEN 50000，成功+失败全量）→ 消费者（独立进程/lifespan task）XREADGROUP batch=100/block=1s → executemany 批量 INSERT → XACK；落库失败 batch 即移 `audit:calls:dead` 死信流（无重试累积）。
 
 ## 关键决策（D1-D4）
 - 审计可丢、请求优先：XADD 失败仅日志+指标，不重试（R4）
