@@ -97,4 +97,4 @@ bash init.sh                            # 注册 server + 创建 token
 - 结构化日志 + OpenTelemetry（详见 `~/.claude/docs/observability-coding-standards.md`）
 - 写代码前先读 `knowledge-base/fastmcp-v4/` 对应文档
 
-详细规范见 [CLAUDE.md](CLAUDE.md)。
+详细规范见 [CLAUDE.md](CLAUDE.md)，版本更新记录见 [RELEASE.md](RELEASE.md)。
