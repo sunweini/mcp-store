@@ -12,7 +12,7 @@
 1. 审计同步写 MySQL（每请求 1 次 INSERT）在请求热路径，池 maxsize=10
 2. 失败路径 Redis stream + MySQL 双写（stream 已无读取方 = 死重）
 3. token 每请求 Redis hgetall，Redis 抖 = 全站 403 风暴
-4. `_unmount_one` 连接池泄漏（代码自留 TODO，靠 GC）
+4. **`_get_client()` 每请求新建 Client + `httpx2.AsyncClient` 连接池**（proxy.py:822 + _httpx_utils.py:95，已核实）——每请求到后端 MCP 一次 TCP+TLS 握手；`_unmount_one` 另留连接池泄漏 TODO（靠 GC）
 5. `watch_changes` pubsub 断连无自愈（搜索 MCP 已修，gateway 未修）
 6. 无背压、无调用总超时
 
@@ -59,6 +59,8 @@ gateway-admin（消费者，lifespan 后台 task）
 - proxy 删除 `db.py`（唯一调用方是 audit.py，已核实）
 - 失败行 message/journey 完整（前端失败面板依赖）；成功行留空（现状等价）
 - 落库延迟 <1s（XREADGROUP block 1s + batch 100）
+- **time 格式保持不变**：现有 proxy 写 `%Y-%m-%d %H:%M:%S.000`（middleware.py:157，固定 .000 无真实毫秒）。stream 消息沿用同格式，消费者原样写入 DATETIME(3) 列——**禁止"顺手加毫秒"**：dashboard 时间桶按 `%Y-%m-%d %H:%M:%S` 切分（dashboard.py:118-131），加毫秒破坏桶匹配
+- **journey 列默认值**：schema 是 `DEFAULT ('[]')`（01_calls.sql:16），消费者必须显式写 journey（成功行 `[]`，失败行完整 JSON），不能依赖 DB 默认值——stream 消息里 journey 恒存在
 
 ## 第 2 节：gateway-proxy 并发加固
 
@@ -72,8 +74,11 @@ gateway-admin（消费者，lifespan 后台 task）
   - **订阅实现**：复用现有 `watch_changes` 的**同一条** pubsub 连接订阅双频道（`server:changed` + `token:changed`，redis-py 支持多频道 subscribe），listen 循环按 `msg["channel"]` 分流处理 — 自愈逻辑只维护一个连接，避免第二条 pubsub 连接带来双倍断线面
   - 权限变更（update 权限）同走 `token:changed`，保证吊销与变更即时生效
 
-### 2.2 连接池泄漏修复（registry.py TODO）
-- 存 `_mounted_clients[name] = provider` 引用，unmount 时显式 `aclose()` 底层 client
+### 2.2 Proxy client 复用 + 连接池泄漏修复（registry.py TODO 升级）
+- **背景（已核实，三轮自审最深发现）**：`create_proxy()` 默认 client_factory 每次 `_get_client()` 都新建 Client（proxy.py:822-824 工具调用路径），transport 内部 `create_mcp_http_client` 每次都新建 `httpx2.AsyncClient`（_httpx_utils.py:95）——**每请求到后端 MCP 都是新 TCP+TLS 连接**，与搜索 MCP 的 client 新建问题同构。原 spec 2.2 只提 unmount 泄漏，漏了 hot path 每请求新建
+- **改造**：`create_proxy` 改为传入**复用 client_factory**（FastMCPProxy 支持 client_factory 参数，proxy.py:1249 文档明确"gives you full control over session creation and reuse"）——client_factory 返回**缓存的 Client**（按后端 URL 缓存，复用底层 transport 连接池）
+- 存 `_mounted_clients[name] = client_factory` 引用，unmount 时显式关闭缓存 Client 的 transport（`aclose`），不再依赖 GC
+- 可行性：FastMCP 的 `ProxyClient.new()`（proxy.py:1179）支持派生连接复用——实现时优先用官方派生机制，次选自建缓存
 
 ### 2.3 watch_changes pubsub 自愈
 - 断线重建订阅（aclose → pubsub() → subscribe），与搜索 MCP `_resubscribe` 对齐
@@ -104,7 +109,8 @@ gateway-admin（消费者，lifespan 后台 task）
 
 ### 3.2 KeyPool 借用语义
 - in-flight 计数：选择时临时递减 remaining，完成归还
-- `asyncio.Lock` 保护选择+记账段（单实例内足够）
+- `asyncio.Lock` 保护选择瞬间（next_key 内部）+ 记账瞬间（on_success/on_error 内部）+ **reload() 整表替换**（防止热更新与 in-flight 记账竞态：reload 换新 `_records` dict，on_success 持旧 rec 写回 → 字段更新丢失，已核实 key_pool.py:136-152 整表替换）——**锁绝不包外呼 await**（否则所有并发请求持锁等 API，串行化背压失效）
+- 借用语义落地：next_key 选择 key 时把 remaining 临时扣减 in-flight 值（后续请求自然选到别的 key），完成/失败后 on_success/on_error 归还
 - 边界：多实例部署需 Redis 原子借出（Lua），留作演进（D5 单实例生产）
 
 ### 3.3 Redis 往返合并
@@ -139,9 +145,13 @@ gateway-admin（消费者，lifespan 后台 task）
 ### 部署与回滚（生产 10.33.17.72）
 1. 本地全测试过 → commit
 2. SSH 拉代码 → `bash deploy.sh`
-3. **渐进删双写**（R4）：`audit:failures` 保留 1-2 周，消费者稳定后删
-4. 验证：compose ps 全 UP / 请求日志有数据 / 失败面板有轨迹 / Dashboard 正常（p95 含排队时间，预期变化）/ metrics 正常
-5. 回滚：git 回退 commit + redeploy（双写逻辑还原）
+3. **部署顺序（审计断档防护）**：compose 同时重建 proxy+admin 时启动顺序不保证（compose 只保证依赖序，proxy 不依赖 admin）。proxy 先切 stream 写、admin 消费者未起 → 审计断档。缓解二选一：
+   - (a) 分两次：先 `docker compose up -d gateway-admin`（消费者先起），再 `gateway-proxy`（切写入）——stream 有 MAXLEN 缓冲，admin 先起后 proxy 写入即被消费，零断档
+   - (b) 接受一次性断档（窗口 = admin 重启秒级），风险低（审计可丢 D4）
+   推荐 (a)，spec 采用
+4. **渐进删双写**（R4）：`audit:failures` 保留 1-2 周，消费者稳定后删
+5. 验证：compose ps 全 UP / 请求日志有数据 / 失败面板有轨迹 / Dashboard 正常（p95 含排队时间，预期变化）/ metrics 正常
+6. 回滚：git 回退 commit + redeploy（双写逻辑还原，calls 表继续由 proxy 直写 — 改造期间双写保留正是为此）
 
 ### 新增可观测性指标
 - `audit_queue_depth`（stream 滞后）
@@ -224,6 +234,7 @@ knowledge-base/
 | R8 | Redis 故障全栈降级 | 现有架构固有，token 缓存撑 60s |
 | R9 | MAXLEN 截断粒度 | 50000 条 = 千级 QPS 下 50s 缓冲；仅 admin 长挂触发 |
 | R10 | FastMCP beta 升级风险 | 锁版本 4.0.0b1，无即时风险 |
+| R11 | client_factory 复用改造引入回归（默认新建→复用，session 语义变化） | ProxyClient.new() 派生机制（proxy.py:1179）是官方支持路径；改造后全量回归 + 压测验证工具调用正确性；回滚即恢复默认 factory |
 
 ## 范围外（明确不做）
 
