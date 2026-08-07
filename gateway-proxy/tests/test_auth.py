@@ -72,8 +72,10 @@ def _counting_redis(monkeypatch, real_redis):
 
 
 async def test_verify_token_cache_hit_no_redis(monkeypatch, fake_redis):
-    """缓存命中免 Redis：第二次 verify 不触发 hgetall（LRU + TTL 内）。"""
+    """缓存命中免 Redis：第二次 verify 不触发 hgetall（LRU + TTL 内），
+    且命中计数 token_cache_hit_total +1、未命中 token_cache_miss_total +1。"""
     import auth
+    import observability
     await fake_redis.hset(
         f"tokens:{hash_token('tok_abc')}",
         mapping={
@@ -83,14 +85,27 @@ async def test_verify_token_cache_hit_no_redis(monkeypatch, fake_redis):
         },
     )
     calls = _counting_redis(monkeypatch, fake_redis)
+    hits, misses = {"n": 0}, {"n": 0}
+
+    class FakeCounter:
+        def __init__(self, store):
+            self._store = store
+
+        def add(self, n, attrs):
+            self._store["n"] += n
+
+    monkeypatch.setattr(observability, "TOKEN_CACHE_HIT", FakeCounter(hits))
+    monkeypatch.setattr(observability, "TOKEN_CACHE_MISS", FakeCounter(misses))
 
     info = await auth.verify_token("tok_abc")
     assert info is not None
     assert calls["hgetall"] == 1
-    # 第二次命中缓存，不再打 Redis
+    assert misses["n"] == 1 and hits["n"] == 0
+    # 第二次命中缓存，不再打 Redis，且计 HIT
     info2 = await auth.verify_token("tok_abc")
     assert info2 == info
     assert calls["hgetall"] == 1
+    assert hits["n"] == 1 and misses["n"] == 1
 
 
 async def test_verify_token_cache_invalidate(monkeypatch, fake_redis):
@@ -122,14 +137,29 @@ async def test_verify_token_cache_invalidate(monkeypatch, fake_redis):
 
 
 async def test_verify_token_invalid_cached_no_repeated_redis(monkeypatch, fake_redis):
-    """invalid token 缓存为 None：第二次验证不重复打 Redis（防空查风暴）。"""
+    """invalid token 缓存为 None：第二次验证不重复打 Redis（防空查风暴），
+    且缓存 None 命中同样计 token_cache_hit_total。"""
     import auth
+    import observability
     calls = _counting_redis(monkeypatch, fake_redis)
+    hits, misses = {"n": 0}, {"n": 0}
+
+    class FakeCounter:
+        def __init__(self, store):
+            self._store = store
+
+        def add(self, n, attrs):
+            self._store["n"] += n
+
+    monkeypatch.setattr(observability, "TOKEN_CACHE_HIT", FakeCounter(hits))
+    monkeypatch.setattr(observability, "TOKEN_CACHE_MISS", FakeCounter(misses))
 
     info = await auth.verify_token("tok_nonexistent")
     assert info is None
     assert calls["hgetall"] == 1
-    # 已缓存为 None → 不再打 Redis
+    assert misses["n"] == 1 and hits["n"] == 0
+    # 已缓存为 None → 不再打 Redis，计 HIT
     info2 = await auth.verify_token("tok_nonexistent")
     assert info2 is None
     assert calls["hgetall"] == 1
+    assert hits["n"] == 1 and misses["n"] == 1

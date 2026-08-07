@@ -21,6 +21,8 @@ REQUESTS_TOTAL = None
 REQUEST_LATENCY = None
 AUTH_FAILURES = None
 AUDIT_DROPPED_TOTAL = None
+TOKEN_CACHE_HIT = None
+TOKEN_CACHE_MISS = None
 
 
 def init_telemetry(service_name: str = "mcp-gateway") -> None:
@@ -37,6 +39,7 @@ def init_telemetry(service_name: str = "mcp-gateway") -> None:
         logger.info("telemetry_disabled", reason="OTEL_SDK_DISABLED", service=service_name)
         return
     global REQUESTS_TOTAL, REQUEST_LATENCY, AUTH_FAILURES, AUDIT_DROPPED_TOTAL
+    global TOKEN_CACHE_HIT, TOKEN_CACHE_MISS
 
     resource = Resource.create({
         "service.name": os.environ.get("OTEL_SERVICE_NAME", service_name),
@@ -68,6 +71,8 @@ def init_telemetry(service_name: str = "mcp-gateway") -> None:
         REQUEST_LATENCY = meter.create_histogram("gateway_request_duration_seconds", description="Request latency")
         AUTH_FAILURES = meter.create_counter("gateway_auth_failures_total", description="Auth failures")
         AUDIT_DROPPED_TOTAL = meter.create_counter("audit_dropped_total", description="Audit stream XADD failures")
+        TOKEN_CACHE_HIT = meter.create_counter("token_cache_hit_total", description="Token cache hits")
+        TOKEN_CACHE_MISS = meter.create_counter("token_cache_miss_total", description="Token cache misses")
         logger.info("metrics_configured", service=service_name, port=PROMETHEUS_PORT)
     except Exception as exc:
         # Catch OSError (port conflict on Linux/Docker) AND ImportError (missing

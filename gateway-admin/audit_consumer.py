@@ -120,8 +120,8 @@ async def _consume_batch(redis) -> int:
         return len(ids)
     except Exception as e:
         # 每次失败即死信 + XACK（保守语义，无重试累积）：死信成功后必须 XACK
-        # 原消息，否则 PEL 无限重投。死信写不进（Redis 挂了）则保留 PEL，
-        # Redis 恢复后该批会被再次拉到并再次尝试落库。
+        # 原消息，否则 PEL 无限重投。死信写失败时消息保留在 PEL，不会被 `>`
+        # 重读，需 XAUTOCLAIM 人工恢复（D4 审计可丢容忍）。
         try:
             await _move_to_dead(redis, ids, str(e))
             await redis.xack(_STREAM, _GROUP, *[i for i, _ in ids])

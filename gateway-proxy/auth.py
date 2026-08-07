@@ -69,7 +69,14 @@ async def verify_token(token: str) -> dict | None:
     token_hash = hash_token(token)
     cached = _cache_get(token_hash)
     if cached is not None or token_hash in _cache:
+        # 缓存命中（含已缓存为 None 的 invalid token）——免 Redis
+        import observability  # 运行时取值：防 init_telemetry 前 from-import 绑定 None 永失效
+        if observability.TOKEN_CACHE_HIT:
+            observability.TOKEN_CACHE_HIT.add(1, {})
         return cached
+    import observability  # 同上：运行时取值
+    if observability.TOKEN_CACHE_MISS:
+        observability.TOKEN_CACHE_MISS.add(1, {})
     r = get_redis()
     data = await r.hgetall(f"tokens:{token_hash}")
     if not data:
