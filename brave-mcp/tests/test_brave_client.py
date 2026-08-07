@@ -35,6 +35,30 @@ async def test_request_sends_key_header():
     await client.close()
 
 
+async def test_request_sends_per_request_timeout(monkeypatch):
+    """每请求显式传 timeout——工具层 5s 语义不被共享 client 30s 兜底掩盖。
+
+    断言点：捕获 httpx.AsyncClient.request 收到的显式 timeout kwarg。
+    不能只断请求 extensions["timeout"]——transport 注入路径下 client
+    默认 timeout 恰等于 per-request 值（都是 5.0），删掉请求级 timeout
+    后 extensions 仍显示 5.0、测试假绿；request 层 kwargs 缺省为 None，
+    删掉即变红（mutation 实测验证）。
+    """
+    captured = {}
+    real_request = httpx.AsyncClient.request
+
+    async def _patched(self, method, url, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return await real_request(self, method, url, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", _patched)
+    transport = MockTransport({"web": {"results": []}})
+    client = BraveClient("BSA-test", timeout=5.0, transport=transport)
+    await client.web_search({"q": "hello"})
+    assert captured["timeout"] == 5.0
+    await client.close()
+
+
 async def test_shared_client_honors_search_proxy_env(monkeypatch):
     """共享 client 按 SEARCH_PROXY 走代理（brave 生产必须走内网代理）。
 

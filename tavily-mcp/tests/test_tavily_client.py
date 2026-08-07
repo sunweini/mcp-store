@@ -34,6 +34,29 @@ async def test_request_sends_bearer_header(mock_transport):
     await client.close()
 
 
+async def test_request_sends_per_request_timeout(monkeypatch, mock_transport):
+    """每请求显式传 timeout——工具层 5s 语义不被共享 client 30s 兜底掩盖。
+
+    断言点：捕获 httpx.AsyncClient.request 收到的显式 timeout kwarg。
+    不能只断请求 extensions["timeout"]——transport 注入路径下 client
+    默认 timeout 恰等于 per-request 值（都是 5.0），删掉请求级 timeout
+    后 extensions 仍显示 5.0、测试假绿；request 层 kwargs 缺省为 None，
+    删掉即变红（mutation 实测验证）。
+    """
+    captured = {}
+    real_request = httpx.AsyncClient.request
+
+    async def _patched(self, method, url, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return await real_request(self, method, url, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", _patched)
+    client = TavilyClient("tvly-test", timeout=5.0, transport=mock_transport({}))
+    await client.search({"query": "q"})
+    assert captured["timeout"] == 5.0
+    await client.close()
+
+
 async def test_search_success(mock_transport):
     client = TavilyClient("tvly-test", transport=mock_transport(
         {"results": [{"title": "t", "url": "https://x"}]}))
@@ -59,9 +82,21 @@ async def test_search_429_classified_rate_limit(mock_transport):
     await client.close()
 
 
-async def test_usage_returns_remaining(mock_transport):
+async def test_usage_returns_remaining(monkeypatch, mock_transport):
     client = TavilyClient("tvly-test", transport=mock_transport(
         {"plan_usage": {"search": {"remaining": 987}}}))
+    # usage() 请求级凭证断言：注入路径 client 无默认 headers，删掉请求级
+    # headers 即变红（mutation 验证有效）
+    captured = {}
+    real_request = httpx.AsyncClient.request
+
+    async def _patched(self, method, url, **kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return await real_request(self, method, url, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", _patched)
     usage = await client.usage()
     assert usage["plan_usage"]["search"]["remaining"] == 987
+    assert mock_transport.last_request.headers["Authorization"] == "Bearer tvly-test"
+    assert captured["timeout"] == 5.0  # usage 同样走 per-request timeout
     await client.close()
