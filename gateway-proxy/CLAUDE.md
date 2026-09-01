@@ -16,6 +16,23 @@ MCP 网关代理。聚合后端 MCP server，token 认证，读写权限控制�
 - 背压/超时：per-backend semaphore（默认 100）+ 总超时 90s（per-server call_timeout 覆盖）
 - pubsub 自愈：watch_changes 断线重建订阅（server:changed + token:changed 同连接）
 
+## 权限判定与 TOOL_REGISTRY（2026-09 实施）
+
+- `routing.TOOL_REGISTRY[server] = {tool: mode}` 是每个工具读/写判定的**唯一权威**；
+  mode 来自 `registry._introspect_tools` 的 `annotations.destructiveHint`
+  （true → `write`，else `read`）。`PermissionMiddleware` 的 `tools/list` 过滤与
+  `tools/call` 拦截都走 `check_permission(token_info, server, mode)`。
+- **坑（2026-09 实测越权）**：`_mount_one` 在 `_introspect_tools` 失败（网络抖动/
+  后端暂不可达，返回 `[]`）时，若仍 `register_tools(name, [])` 会用空 dict 覆盖
+  `TOOL_REGISTRY`，导致 `get_tool_mode` 对任何工具退回默认 `'read'`——只读 token
+  也能看到并调用 write 工具。修复：只有 tools **非空**才 `register_tools` 并写
+  redis `servers:{name}.tools`；失败时保留上一次成功的 mode 元数据
+  （日志 `introspect_empty_keep_last_tools`）。工具真正清零由 `_unmount_one` 的
+  `clear_tools` 负责。
+- 排查：出现"只 read 权限却看到/调用 write 工具"，先查 proxy 日志
+  `introspect_failed` / `introspect_empty_keep_last_tools`，多半是 TOOL_REGISTRY 被
+  一次瞬时故障污染，重启 proxy 重新 introspect 即恢复。
+
 ## 本地开发
 ```bash
 uv sync

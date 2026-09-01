@@ -31,6 +31,10 @@ class TokenCreate(BaseModel):
     permissions: dict[str, PermissionSpec]
 
 
+class TokenUpdate(BaseModel):
+    permissions: dict[str, PermissionSpec]
+
+
 def generate_token() -> str:
     """Generate a random token string: tok_ + 24 url-safe chars."""
     return "tok_" + secrets.token_urlsafe(24)
@@ -96,6 +100,47 @@ async def list_tokens(_: str = Depends(require_admin)):
                 "created_at": data.get("created_at", ""),
             })
     return out
+
+
+@router.put("/{token_id}")
+async def update_token(token_id: str, req: TokenUpdate, _: str = Depends(require_admin)):
+    """更新 token 的 server 级 read/write 权限（MCP 工具权限编辑）。
+
+    只更新请求里出现的 server；未在请求里出现的 server 保持现值不变。
+    校验引用的 server 已注册（与 create 一致）。
+    注意：aliyun-dns-mcp 的 server 级权限是账户授权矩阵的 union 权威
+    （aliyun_perms._recompute_union 写回），此端点不改它——若是请求里
+    带了 aliyun-dns-mcp 也会被忽略，避免覆盖账户授权的计算结果。
+    """
+    r = get_redis()
+    token_hash = await r.get(f"token_id:{token_id}")
+    if not token_hash:
+        raise HTTPException(status_code=404, detail="token not found")
+    for server_name in req.permissions:
+        if not await r.exists(f"servers:{server_name}"):
+            raise HTTPException(status_code=422, detail=f"server '{server_name}' not registered")
+
+    data = await r.hgetall(f"tokens:{token_hash}")
+    perms = json.loads(data.get("permissions", "{}"))
+    for srv, p in req.permissions.items():
+        # aliyun-dns-mcp 的粗闸由账户授权矩阵驱动，MCP 级编辑不覆盖。
+        if srv == "aliyun-dns-mcp":
+            continue
+        perms[srv] = {"read": p.read, "write": p.write}
+    await r.hset(f"tokens:{token_hash}", "permissions", json.dumps(perms))
+
+    # 缓存失效通知：权限收紧必须即时广播（proxy 本地缓存最长 60s）。
+    try:
+        await r.publish("token:changed", json.dumps({"token_hash": token_hash}))
+    except Exception as e:
+        logger.warning("token_publish_failed", error=str(e), service="gateway-admin")
+
+    return {
+        "id": token_id,
+        "name": data.get("name", ""),
+        "permissions": perms,
+        "created_at": data.get("created_at", ""),
+    }
 
 
 @router.delete("/{token_id}", status_code=204)

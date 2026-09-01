@@ -112,8 +112,11 @@ async def test_mount_unmount_integration(fake_redis):
     # After mount: a provider with namespace='zabbix' must exist.
     zabbix_providers = [p for p in gateway.providers if _provider_namespace(p) == "zabbix"]
     assert len(zabbix_providers) == 1, f"expected 1 zabbix provider, got {len(zabbix_providers)}"
-    # And TOOL_REGISTRY has an entry (empty - introspect failed, which is fine).
-    assert "zabbix" in routing.TOOL_REGISTRY
+    # Introspect failed (backend unreachable) → tools == [] → 不写入 TOOL_REGISTRY
+    # 空 dict。保留为空/无条目，使 get_tool_mode 不因空注册而退回默认 'read'
+    # （那会让只读 token 看到/调用 write 工具）。注册依旧成功，但模式元数据
+    # 不被一次瞬时故障清空——这是权限判定的安全边界。
+    assert "zabbix" not in routing.TOOL_REGISTRY
 
     await _unmount_one(gateway, "zabbix")
 
@@ -184,8 +187,11 @@ async def test_mount_one_url_unreachable(fake_redis):
     await _mount_one(gateway, "zabbix", "http://localhost:9999/mcp")
     # Provider mounted even though introspect failed.
     assert any(_provider_namespace(p) == "zabbix" for p in gateway.providers)
-    # Empty tool list registered (not absent).
-    assert routing.TOOL_REGISTRY.get("zabbix") == {}
+    # Introspect 失败 → tools == [] → 不写入空 dict。保留缺省（无条目），
+    # get_tool_mode 只对"已知其 mode"的工具返回默认 read，未注册的空 dict
+    # 会让任何工具读成 read（只读 token 可越权调 write）。此断言锁定修复：
+    # 瞬时故障不污染权限模式元数据。
+    assert "zabbix" not in routing.TOOL_REGISTRY
 
     # Cleanup.
     await _unmount_one(gateway, "zabbix")

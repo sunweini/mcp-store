@@ -108,3 +108,123 @@ def test_delete_token_publishes_token_changed(client, fake_redis, auth_headers, 
     channel, message = publishes[0]
     assert channel == "token:changed"
     assert len(json.loads(message)["token_hash"]) == 64
+
+
+# ─── PUT /api/tokens/{id} — 更新 server 级权限 ──────────────────────
+
+
+def test_update_token_permissions(client, fake_redis, auth_headers):
+    """PUT 更新 token 的 server 级 read/write 权限。"""
+    client.post("/api/servers", json={"name": "zabbix", "url": "http://x", "description": ""},
+                headers=auth_headers)
+    client.post("/api/servers", json={"name": "tavily", "url": "http://y", "description": ""},
+                headers=auth_headers)
+    r = client.post("/api/tokens", json={
+        "name": "ro", "permissions": {"zabbix": {"read": True, "write": False}},
+    }, headers=auth_headers)
+    tok_id = r.json()["id"]
+
+    resp = client.put(f"/api/tokens/{tok_id}", json={
+        "permissions": {"zabbix": {"read": True, "write": True}, "tavily": {"read": True, "write": False}},
+    }, headers=auth_headers)
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["permissions"]["zabbix"] == {"read": True, "write": True}
+    assert data["permissions"]["tavily"] == {"read": True, "write": False}
+
+
+def test_update_token_unknown_server_rejected(client, fake_redis, auth_headers):
+    client.post("/api/servers", json={"name": "zabbix", "url": "http://x", "description": ""},
+                headers=auth_headers)
+    r = client.post("/api/tokens", json={
+        "name": "ro", "permissions": {"zabbix": {"read": True, "write": False}},
+    }, headers=auth_headers)
+    tok_id = r.json()["id"]
+
+    resp = client.put(f"/api/tokens/{tok_id}", json={
+        "permissions": {"ghost": {"read": True, "write": False}},
+    }, headers=auth_headers)
+    assert resp.status_code == 422
+
+
+def test_update_token_not_found(client, fake_redis, auth_headers):
+    resp = client.put("/api/tokens/tokid_missing", json={
+        "permissions": {"zabbix": {"read": True, "write": False}},
+    }, headers=auth_headers)
+    assert resp.status_code == 404
+
+
+def test_update_token_revoke_all_persists_false(client, fake_redis, auth_headers):
+    """PUT 发送 read=false,write=false 的 server 应存为取消（条目在但全 false）。
+
+    修复「编辑MCP权限」取消权限不生效的回归：前端若过滤掉全 false 的
+    server 不再发送，后端会因「只更新出现的 server」而保留旧值。后端层面
+    正确行为是：收到全 false 就写成 false 条目，让 check_permission 拒绝。
+    """
+    client.post("/api/servers", json={"name": "zabbix", "url": "http://x", "description": ""},
+                headers=auth_headers)
+    r = client.post("/api/tokens", json={
+        "name": "ro", "permissions": {"zabbix": {"read": True, "write": True}},
+    }, headers=auth_headers)
+    tok_id = r.json()["id"]
+
+    resp = client.put(f"/api/tokens/{tok_id}", json={
+        "permissions": {"zabbix": {"read": False, "write": False}},
+    }, headers=auth_headers)
+
+    assert resp.status_code == 200
+    assert resp.json()["permissions"]["zabbix"] == {"read": False, "write": False}
+
+
+def test_update_token_does_not_overwrite_aliyun_dns(client, fake_redis, auth_headers):
+    """MCP 级编辑不覆盖 aliyun-dns-mcp 的粗闸（账户授权矩阵权威）。
+
+    创建时把 aliyun-dns-mcp 设为 write=true（模拟账户授权 union 结果），
+    然后用 PUT 尝试把 aliyun-dns-mcp 改成 write=false——应被忽略，保持
+    write=true；同时正常更新其它 server（tavily）。
+    """
+    client.post("/api/servers", json={"name": "zabbix", "url": "http://x", "description": ""},
+                headers=auth_headers)
+    client.post("/api/servers", json={"name": "aliyun-dns-mcp", "url": "http://a", "description": ""},
+                headers=auth_headers)
+    client.post("/api/servers", json={"name": "tavily", "url": "http://y", "description": ""},
+                headers=auth_headers)
+    r = client.post("/api/tokens", json={
+        "name": "ro",
+        "permissions": {"aliyun-dns-mcp": {"read": True, "write": True},
+                        "tavily": {"read": True, "write": False}},
+    }, headers=auth_headers)
+    tok_id = r.json()["id"]
+
+    resp = client.put(f"/api/tokens/{tok_id}", json={
+        "permissions": {"aliyun-dns-mcp": {"read": False, "write": False}, "tavily": {"read": True, "write": True}},
+    }, headers=auth_headers)
+
+    assert resp.status_code == 200
+    # aliyun-dns-mcp 保持不变（write=true 未被覆盖），tavily 已更新为 write=true
+    assert resp.json()["permissions"]["aliyun-dns-mcp"] == {"read": True, "write": True}
+    assert resp.json()["permissions"]["tavily"] == {"read": True, "write": True}
+
+
+def test_update_token_publishes_token_changed(client, fake_redis, auth_headers, monkeypatch):
+    """PUT 成功后 publish 一次 token:changed（缓存即时失效）。"""
+    publishes = []
+    async def counting_publish(channel, message):
+        publishes.append((channel, message))
+    monkeypatch.setattr(fake_redis, "publish", counting_publish)
+    client.post("/api/servers", json={"name": "zabbix", "url": "http://x", "description": ""},
+                headers=auth_headers)
+    r = client.post("/api/tokens", json={
+        "name": "ro", "permissions": {"zabbix": {"read": True, "write": False}},
+    }, headers=auth_headers)
+    publishes.clear()
+    tok_id = r.json()["id"]
+    resp = client.put(f"/api/tokens/{tok_id}", json={
+        "permissions": {"zabbix": {"read": True, "write": True}},
+    }, headers=auth_headers)
+    assert resp.status_code == 200
+    assert len(publishes) == 1
+    channel, message = publishes[0]
+    assert channel == "token:changed"
+    assert len(json.loads(message)["token_hash"]) == 64

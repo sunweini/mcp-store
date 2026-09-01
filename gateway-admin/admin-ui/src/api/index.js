@@ -29,6 +29,7 @@ export function refreshTools(name)          { return apiFetch(`/api/servers/${na
 export function lifecycleServer(name, action) { return apiFetch(`/api/servers/${name}/lifecycle`, { method: 'POST', body: JSON.stringify({ action }) }) }
 export function getTokens()                 { return apiFetch('/api/tokens') }
 export function createToken(data)           { return apiFetch('/api/tokens', { method:'POST', body:JSON.stringify(data) }) }
+export function updateToken(id, data)       { return apiFetch(`/api/tokens/${id}`, { method:'PUT', body:JSON.stringify(data) }) }
 export function deleteToken(id)             { return apiFetch(`/api/tokens/${id}`, { method:'DELETE' }) }
 
 // ── Search API keys ─────────────────────────────

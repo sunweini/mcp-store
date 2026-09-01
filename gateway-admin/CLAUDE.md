@@ -14,6 +14,16 @@ MCP 网关管理面。FastAPI 管理 API（server/token/dashboard/calls）+ Vue 
 - 落库失败即移 `audit:calls:dead` 死信流（**每次失败即死信 + XACK，无重试累积**）
 - 查询只读 MySQL calls 表，禁读 Redis stream
 
+## Token 权限编辑（2026-09 实施）
+- `PUT /api/tokens/{id}` 更新 token 的 server 级 read/write 权限（前端「编辑MCP权限」按钮）。
+- **只更新请求里出现的 server；未出现的保持现值**。前端「编辑MCP权限」弹窗**全量**发送
+  每个 non-aliyun server（含 read/write 全 false 的）——若只发"至少开了一项"的 server，
+  全取消的那项会因后端「只更新出现的 server」而保留旧权限，导致"取消权限不生效"。
+- **aliyun-dns-mcp 的 server 级粗闸由账户授权矩阵 union 权威**（`aliyun_perms._recompute_union`
+  写回），`PUT /api/tokens/{id}` 对该 server 直接跳过——避免 MCP 级编辑覆盖账户授权结果。
+  该 server 的权限只在「授权」页按账户配置。
+- 更新后 publish `token:changed` 使 proxy 本地 token 缓存即时失效（吊销/变更不等 60s TTL）。
+
 ## 本地开发
 ```bash
 uv sync

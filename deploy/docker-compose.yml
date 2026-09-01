@@ -199,6 +199,26 @@ services:
     depends_on: [redis]
     restart: unless-stopped
 
+  # general-rag 知识库检索 MCP：容器内 9055 不映射宿主（仅容器内网互访）；
+  # metrics 9470 -> 容器内 9464（宿主端避开 proxy 9465 / 搜索 MCP 9466-9468 / aliyun 9469）
+  # 无 Redis 依赖——后端 general-rag 无鉴权、无 key 池、无共享状态
+  general-rag-mcp:
+    build: ../general-rag-mcp
+    ports:
+      - "9470:9464"
+    environment:
+      GENERAL_RAG_BASE_URL: "${GENERAL_RAG_BASE_URL:-http://10.33.17.72:8001/api/v1}"
+      GENERAL_RAG_TIMEOUT: "60"
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "9055"
+      LOG_FORMAT: json
+      LOG_FILE: /app/logs/general-rag-mcp.log
+      PROMETHEUS_PORT: "9464"
+    volumes:
+      - ./logs/general-rag-mcp:/app/logs
+    networks: [mcp-net]
+    restart: unless-stopped
+
 networks:
   mcp-net:
     driver: bridge

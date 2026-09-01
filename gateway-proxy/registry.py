@@ -322,10 +322,24 @@ async def _mount_one(gateway, name: str, url: str) -> None:
         logger.error("mount_failed", server=name, error=str(e), service="gateway-proxy")
         return
     tools = await _introspect_tools(url)
-    register_tools(name, tools)
-    # store tools back to redis for the admin UI to read
+    # 只有 introspect 成功（tools 非空）才更新 TOOL_REGISTRY 与 redis 的
+    # tools 字段。introspect 失败（网络抖动/后端暂不可达）返回 []，此时
+    # 若仍 register_tools(name, []) 会用空 dict 覆盖 TOOL_REGISTRY，导致
+    # get_tool_mode 对任何工具退回默认 'read'——只读 token 也能看到/调用
+    # write 工具（2026-09 实测）。保留上一次成功的 mode 元数据，权限判定
+    # 才不因一次瞬时故障而退化。真正的"工具清零"由 _unmount_one 的
+    # clear_tools 负责，不在这里。
     r = get_redis()
-    await r.hset(f"servers:{name}", "tools", json.dumps(tools))
+    if tools:
+        register_tools(name, tools)
+        await r.hset(f"servers:{name}", "tools", json.dumps(tools))
+    else:
+        logger.warning(
+            "introspect_empty_keep_last_tools",
+            server=name,
+            note="introspect returned no tools; keeping last-known TOOL_REGISTRY / tools",
+            service="gateway-proxy",
+        )
     # 缓存 per-server 总超时（挂载时读一次 Redis，请求路径不再读）
     try:
         raw = await r.hget(f"servers:{name}", "call_timeout")

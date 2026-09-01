@@ -40,6 +40,7 @@
           <td class="mono" style="font-size:11.5px;color:var(--muted)">{{ fmtDate(t.created_at) }}</td>
           <td>
             <div class="row-actions">
+              <button class="mini-btn" @click="openMcpPerms(t)">编辑MCP权限</button>
               <button class="mini-btn" @click="openPerms(t)">授权</button>
               <button class="mini-btn danger" @click="doDelete(t)">删除</button>
             </div>
@@ -118,12 +119,42 @@
         <button class="btn btn-primary" :disabled="savingPerms" @click="savePerms">{{ savingPerms ? '保存中…' : '保存' }}</button>
       </template>
     </Modal>
+
+    <!-- ═════ MCP SERVER PERMISSION EDIT MODAL ═════ -->
+    <Modal :show="!!mcpPermModal" :title="'编辑MCP权限 — ' + (mcpPermModal?.token_name || '')" @close="mcpPermModal = null">
+      <p style="font-size:12px;color:var(--muted);margin-bottom:12px">
+        勾选该 token 对每个 MCP server 的读/写权限。aliyun-dns-mcp 由
+        「授权」账户矩阵管理，此处不显示。保存后即时生效（proxy 缓存自动失效）。
+      </p>
+      <div class="server-perm-block" v-for="s in mcpServers" :key="s.name">
+        <div class="server-perm-name">
+          <span class="led" :class="healthLed(s.health)"></span> {{ s.name }}
+        </div>
+        <div class="perm-toggles">
+          <label class="perm-toggle read">
+            <input type="checkbox" v-model="mcpPermModal.perms[s.name].read" />
+            <span class="switch"></span>
+            <span class="plabel">Read</span>
+          </label>
+          <label class="perm-toggle write">
+            <input type="checkbox" v-model="mcpPermModal.perms[s.name].write" />
+            <span class="switch"></span>
+            <span class="plabel">Write</span>
+          </label>
+        </div>
+      </div>
+      <div v-if="!mcpServers.length" class="muted" style="font-size:12px;padding:8px 0">暂无已注册的 MCP Server</div>
+      <template #footer>
+        <button class="btn btn-ghost" @click="mcpPermModal = null">取消</button>
+        <button class="btn btn-primary" :disabled="savingMcp" @click="saveMcpPerms">{{ savingMcp ? '保存中…' : '保存' }}</button>
+      </template>
+    </Modal>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { getTokens, createToken, deleteToken, getServers, getAliyunAccounts, getAliyunPerms, putAliyunPerms } from '../api/index.js'
+import { getTokens, createToken, deleteToken, updateToken, getServers, getAliyunAccounts, getAliyunPerms, putAliyunPerms } from '../api/index.js'
 import Modal from '../components/Modal.vue'
 
 /* ── state ── */
@@ -137,10 +168,17 @@ const tokenModal = ref(null)
 const permModal = ref(null)
 const permAccounts = ref([])
 const savingPerms = ref(false)
+const mcpPermModal = ref(null)
+const savingMcp = ref(false)
 
 /* ── computed ── */
 const filteredTokens = computed(() =>
   tokens.value.filter(t => t.name.includes(tokenQuery.value))
+)
+
+// 编辑MCP权限弹窗只列出非 aliyun-dns-mcp 的 server（后者由账户矩阵权威管理）。
+const mcpServers = computed(() =>
+  servers.value.filter(s => s.name !== 'aliyun-dns-mcp')
 )
 
 /* ── helpers ── */
@@ -248,6 +286,40 @@ async function savePerms() {
     error.value = '保存授权失败: ' + e.message
   } finally {
     savingPerms.value = false
+  }
+}
+
+/* ── MCP server permission edit (non-aliyun servers) ── */
+function openMcpPerms(t) {
+  savingMcp.value = false; error.value = ''
+  // 以 token 现有 permissions 为准初始化；缺省 server 置为全关。
+  const perms = {}
+  mcpServers.value.forEach(s => {
+    const cur = (t.permissions || {})[s.name] || {}
+    perms[s.name] = { read: !!cur.read, write: !!cur.write }
+  })
+  mcpPermModal.value = { token_id: t.id, token_name: t.name, perms }
+}
+
+async function saveMcpPerms() {
+  const m = mcpPermModal.value
+  savingMcp.value = true; error.value = ''
+  try {
+    // 全量发送每个 server（含 read/write 全 false 的）——若只发"至少开了一项"
+    // 的 server，全取消的那项会因后端「只更新出现的 server」而保留旧权限，
+    // 导致"取消权限不生效"。后端收到全 false 会写成 false 条目，等
+    // check_permission 拒绝（回归：取消 zabbix-mcp 权限后重开页面仍在）。
+    const active = {}
+    for (const [srv, p] of Object.entries(m.perms)) {
+      active[srv] = { read: !!p.read, write: !!p.write }
+    }
+    await updateToken(m.token_id, { permissions: active })
+    mcpPermModal.value = null
+    await loadTokens()
+  } catch (e) {
+    error.value = '保存MCP权限失败: ' + e.message
+  } finally {
+    savingMcp.value = false
   }
 }
 

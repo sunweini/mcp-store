@@ -1,0 +1,230 @@
+"""general-rag 知识库 API client.
+
+封装 general-rag 后端 REST API（OpenAI 风格，非流式，无鉴权）。
+- 共享 httpx client 单例（C1）：连接池复用，禁止每调用新建
+- per-request timeout：默认 60s（LLM 答案合成可能较慢，指南 §9 要求 ≥60s）
+- 503 指数退避：读接口 1s/2s/4s 最多 3 次；ingest 写操作不重试（非幂等）
+- 隐私约束：snippet 截断，日志不转储完整文档内容
+"""
+from typing import Any
+import asyncio
+import os
+import time
+
+import httpx
+import structlog
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
+logger = structlog.get_logger()
+tracer = trace.get_tracer("general_rag_mcp.rag_client")
+
+# NOTE: 只读/可重试的接口才有退避重试；ingest 写操作不重试。
+_READ_RETRY_DELAYS = (1.0, 2.0, 4.0)
+
+# 隐私约束（指南 §3）：snippet 截断长度，避免完整转储文档内容进日志/返回体。
+SNIPPET_LIMIT = 500
+
+
+class RagError(Exception):
+    """general-rag API 返回了业务错误（4xx/5xx），status_code 记录 HTTP 码。"""
+
+    def __init__(self, message: str, status_code: int = 0):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class RagConnectionError(Exception):
+    """网络层失败 — general-rag 服务不可达。"""
+
+
+def truncate(text: str, limit: int = SNIPPET_LIMIT) -> str:
+    """截断文本到 limit 字符，用于 snippet 展示与日志脱敏。
+
+    隐私约束（指南 §3）：不完整转储检索到的文档内容。
+    """
+    if text is None:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…"
+
+
+class RagClient:
+    """general-rag REST API 客户端（无鉴权，内网信任环境）。"""
+
+    def __init__(self, base_url: str, timeout: float = 60.0):
+        # NOTE: 去掉末尾斜杠避免后续拼接出现双斜杠；base_url 已含 /api/v1。
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout
+        self._http = httpx.AsyncClient(timeout=timeout)
+
+    async def close(self) -> None:
+        """关闭 httpx 连接池。"""
+        if self._http:
+            await self._http.aclose()
+            self._http = None  # type: ignore[assignment]
+
+    # ── 只读接口 ───────────────────────────────────────────────────
+
+    async def search(
+        self,
+        query: str,
+        namespace: str,
+        top_k: int = 5,
+        doc_type: str | None = None,
+        tags: list[str] | None = None,
+        categories: list[str] | None = None,
+        use_graph: bool = True,
+    ) -> dict:
+        """POST /search — 检索问答（核心）。namespace 总是显式传。"""
+        payload: dict[str, Any] = {
+            "query": query,
+            "namespace": namespace,
+            "top_k": top_k,
+            "use_graph": use_graph,
+        }
+        # NOTE: 仅在有值时下发可选过滤字段，避免空值被后端误解为过滤条件。
+        if doc_type:
+            payload["doc_type"] = doc_type
+        if tags:
+            payload["tags"] = tags
+        if categories:
+            payload["categories"] = categories
+        return await self._request("POST", "/search", json=payload, retryable=True)
+
+    async def namespaces(self) -> list[str]:
+        """GET /namespaces — 列出可用命名空间。"""
+        data = await self._request("GET", "/namespaces", retryable=True)
+        return data.get("namespaces", [])
+
+    async def health(self) -> dict:
+        """GET /health — 组件状态。"""
+        return await self._request("GET", "/health", retryable=True)
+
+    # ── 写接口 ─────────────────────────────────────────────────────
+
+    async def ingest(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        namespace: str,
+        doc_type: str | None = None,
+        title: str | None = None,
+        tags: str | None = None,
+        categories: str | None = None,
+    ) -> dict:
+        """POST /ingest — 文件摄入（multipart）。写操作，不重试。"""
+        files = {"file": (filename, file_bytes)}
+        data: dict[str, str] = {"namespace": namespace}
+        if doc_type:
+            data["doc_type"] = doc_type
+        if title:
+            data["title"] = title
+        if tags:
+            data["tags"] = tags
+        if categories:
+            data["categories"] = categories
+        return await self._request(
+            "POST", "/ingest", data=data, files=files, retryable=False
+        )
+
+    # ── 底层请求 ───────────────────────────────────────────────────
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict | None = None,
+        data: dict | None = None,
+        files: dict | None = None,
+        retryable: bool,
+    ) -> dict:
+        """发起请求；retryable=True 时对 503/连接错误做指数退避重试。
+
+        指南 §7.5：503 是骨干故障，1s/2s/4s 最多 3 次；400 不重试。
+        """
+        url = f"{self._base_url}{path}"
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                with tracer.start_as_current_span(
+                    f"rag_client.{path.lstrip('/').replace('/', '.')}"
+                ) as span:
+                    span.set_attributes({
+                        "http.method": method,
+                        "http.url": url,
+                    })
+                    start = time.monotonic()
+                    resp = await self._http.request(
+                        method, url, json=json, data=data, files=files
+                    )
+                    duration = time.monotonic() - start
+                    span.set_attribute("http.status_code", resp.status_code)
+
+                    if resp.status_code == 200:
+                        body = resp.json()
+                        return body
+
+                    # 503 是骨干故障，读接口做退避重试。
+                    if resp.status_code == 503 and retryable:
+                        if attempt <= len(_READ_RETRY_DELAYS):
+                            delay = _READ_RETRY_DELAYS[attempt - 1]
+                            logger.warning(
+                                "rag_api_unavailable_retry",
+                                service="general-rag-mcp",
+                                path=path,
+                                attempt=attempt,
+                                delay=delay,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+
+                    # 其余错误：不重试，直接抛业务错误。
+                    # NOTE: 日志不 dump 响应体（隐私，可能含文档内容）。
+                    span.set_status(Status(StatusCode.ERROR, f"HTTP {resp.status_code}"))
+                    logger.error(
+                        "rag_api_error",
+                        service="general-rag-mcp",
+                        path=path,
+                        status_code=resp.status_code,
+                    )
+                    raise RagError(
+                        f"general-rag 返回 HTTP {resp.status_code}", resp.status_code
+                    )
+
+            except RagError:
+                raise
+
+            except httpx.TimeoutException as e:
+                logger.error(
+                    "rag_api_timeout",
+                    service="general-rag-mcp",
+                    path=path,
+                    error=str(e),
+                )
+                raise RagConnectionError(f"general-rag 请求超时: {e}") from e
+
+            except httpx.HTTPError as e:
+                # 连接错误对读接口也算瞬时故障，退避重试。
+                if retryable and attempt <= len(_READ_RETRY_DELAYS):
+                    delay = _READ_RETRY_DELAYS[attempt - 1]
+                    logger.warning(
+                        "rag_api_connection_retry",
+                        service="general-rag-mcp",
+                        path=path,
+                        attempt=attempt,
+                        delay=delay,
+                        error=str(e),
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.error(
+                    "rag_api_connection_error",
+                    service="general-rag-mcp",
+                    path=path,
+                    error=str(e),
+                )
+                raise RagConnectionError(str(e)) from e

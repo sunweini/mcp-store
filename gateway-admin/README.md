@@ -20,7 +20,7 @@ REDIS_URL=redis://localhost:6379/0 JWT_SECRET=your-secret \
 | GET/POST/PUT/DELETE | /api/servers | Server CRUD |
 | GET | /api/servers/{name}/status | 立即探活 |
 | POST | /api/servers/{name}/refresh-tools | 刷新 tools 清单 |
-| GET/POST/DELETE | /api/tokens | Token CRUD |
+| GET/POST/PUT/DELETE | /api/tokens | Token CRUD（PUT 更新 server 级读写权限） |
 | GET | /api/metrics/summary | 监控汇总 |
 | GET | /api/metrics/by-server | 分 server 统计 |
 | GET | /api/metrics/timeseries | 时间序列 |
