@@ -12,6 +12,7 @@ from authorization import (
     INVALID_TOKEN,
     INVALID_TARGET,
     PERMISSION_DENIED,
+    UNKNOWN_MODE,
 )
 
 # 共享 fixture：zabbix 一个 read 一个 write，tavily 一个 read
@@ -57,30 +58,54 @@ def test_authorize_read_only_cannot_write():
 
 
 def test_authorize_unknown_server_denied():
-    """token 无该 server 权限 → permission_denied（server/tool 仍解析出）。
+    """token 有权限但 server 未注册（tool_modes 无记录）→ unknown_mode。
 
     split_prefix 按第一个下划线切分：server 名可含连字符（如 ghost-mcp 是
-    合法 server 名），第一个 _ 之后是 tool。
+    合法 server 名），第一个 _ 之后是 tool。mode 未知 → fail-closed 拒绝，
+    与"有 mode 但权限不够"（permission_denied）区分开。
     """
-    perms = {"zabbix": {"read": True, "write": False}}
+    perms = {"ghost-mcp": {"read": True, "write": True}}
     res = authorize(perms, "ghost-mcp_web_search", _TOOL_MODES)
     assert res.allowed is False
-    assert res.error_type == PERMISSION_DENIED
+    assert res.error_type == UNKNOWN_MODE
     assert res.server == "ghost-mcp"
     assert res.tool == "web_search"
+    assert res.mode is None
 
 
-def test_authorize_unknown_tool_mode_defaults_read():
-    """tool_modes 里没有该工具 → mode 默认 read，仅当 token 有 read 才放行。
-
-    未注册工具按历史语义退化 read（审计 op 不因 registry 缺失落空）。
-    """
-    perms = {"zabbix": {"read": True, "write": False}}
-    res = authorize(perms, "zabbix_undeclared_tool", _TOOL_MODES)
+def test_authorize_known_server_without_grant_denied():
+    """server 已知（tool_modes 有记录）但 token 无权限 → permission_denied。"""
+    perms = {"tavily": {"read": False, "write": False}}
+    res = authorize(perms, "tavily_tavily_search", _TOOL_MODES)
+    assert res.allowed is False
+    assert res.error_type == PERMISSION_DENIED
     assert res.mode == "read"
-    # 有 read -> 放行（退化为 read 的可访问性）
-    assert res.allowed is True
-    assert res.error_type is None
+
+
+def test_authorize_unknown_tool_mode_denied():
+    """tool_modes 里没有该工具 → fail-closed：deny + unknown_mode。
+
+    fail-closed 语义：mode 未知（未注册/未 introspect）时拒绝访问，不再
+    退化成默认 read 放行（防只读 token 越权访问未知 write 工具）。审计
+    借此区分"工具名畸形"（invalid_target）与"mode 未同步"（unknown_mode）。
+    """
+    perms = {"zabbix": {"read": True, "write": True}}
+    res = authorize(perms, "zabbix_undeclared_tool", _TOOL_MODES)
+    assert res.allowed is False
+    assert res.error_type == UNKNOWN_MODE
+    # server/tool 仍解析出（split_prefix 纯切分），mode 未知为 None
+    assert res.server == "zabbix"
+    assert res.tool == "undeclared_tool"
+    assert res.mode is None
+
+
+def test_authorize_unknown_server_mode_denied():
+    """server 在 tool_modes 里无记录 → deny + unknown_mode（而非按 read 判定）。"""
+    perms = {"ghost-mcp": {"read": True, "write": True}}
+    res = authorize(perms, "ghost-mcp_web_search", _TOOL_MODES)
+    assert res.allowed is False
+    assert res.error_type == UNKNOWN_MODE
+    assert res.mode is None
 
 
 # ─── allowed ───────────────────────────────────────────────────────
@@ -120,10 +145,11 @@ def test_authorize_empty_permissions_denied():
 # ─── AuthResult dataclass ──────────────────────────────────────────
 
 def test_auth_result_defaults():
+    """默认 mode 为 None（fail-closed：未知即拒绝，不伪装成 read）。"""
     r = AuthResult(False, INVALID_TOKEN)
     assert r.server == ""
     assert r.tool == ""
-    assert r.mode == "read"
+    assert r.mode is None
 
 
 # ─── get_tool_modes ────────────────────────────────────────────────

@@ -122,6 +122,16 @@ def _resolve_server_name(mcp_name: str) -> str:
         return ""
 
 
+def _audit_op(authz) -> str:
+    """把 AuthResult.mode 转成审计 op 字段值。
+
+    fail-closed 后 mode 可能为 None（unknown_mode：工具未注册），审计如实
+    记 "unknown" 而非伪装成 read——管理界面能据此看出该工具的 mode 当时
+    未同步（正是历史越权 bug 的观察窗口）。
+    """
+    return authz.mode or "unknown"
+
+
 class PermissionMiddleware(Middleware):
     """Intercept tools/call: verify token, check permission, audit failures.
 
@@ -183,7 +193,7 @@ class PermissionMiddleware(Middleware):
             # 消费者落 MySQL 时失败面板的「错误信息 / 查看轨迹」直接可用
             await record_call_stream(
                 meta=build_audit_meta(
-                    token_info, authz.server, authz.tool, authz.mode, latency_ms, trace_id
+                    token_info, authz.server, authz.tool, _audit_op(authz), latency_ms, trace_id
                 ),
                 status="fail",
                 error_type=error_type,
@@ -219,7 +229,7 @@ class PermissionMiddleware(Middleware):
                 message = f"Backend timeout after {timeout}s"
                 await record_call_stream(
                     meta=build_audit_meta(
-                        token_info, authz.server, authz.tool, authz.mode, latency_ms, trace_id
+                        token_info, authz.server, authz.tool, _audit_op(authz), latency_ms, trace_id
                     ),
                     status="fail",
                     error_type="upstream_timeout",
@@ -238,7 +248,7 @@ class PermissionMiddleware(Middleware):
                 message = str(exc)
                 await record_call_stream(
                     meta=build_audit_meta(
-                        token_info, authz.server, authz.tool, authz.mode, latency_ms, trace_id
+                        token_info, authz.server, authz.tool, _audit_op(authz), latency_ms, trace_id
                     ),
                     status="fail",
                     error_type=err_type,
@@ -260,7 +270,7 @@ class PermissionMiddleware(Middleware):
         # 成功也写流：请求日志页需要全量调用明细（不止失败）
         await record_call_stream(
             meta=build_audit_meta(
-                token_info, authz.server, authz.tool, authz.mode, latency_ms, trace_id
+                token_info, authz.server, authz.tool, _audit_op(authz), latency_ms, trace_id
             ),
             status="ok",
             error_type=None,
@@ -317,6 +327,15 @@ class PermissionMiddleware(Middleware):
             # 走同一个 authorize seam：只取 allowed（list 只需"是否可见"，
             # 拒绝原因不重要——跳过该工具即可）。畸形/未注册前缀的授权失败
             # 会被 safely 跳过，避免 tools/list 因工具名 500。
-            if authorize(permissions, t.name, tool_modes).allowed:
+            res = authorize(permissions, t.name, tool_modes)
+            if res.allowed:
                 visible.append(t)
+            elif res.error_type == "unknown_mode":
+                # fail-closed（候选5）：mode 未注册的工具不列出。debug 级便于
+                # 排查 registry 未同步（不该出现在正常运行的 gateway 上）。
+                logger.debug(
+                    "list_tools_skipped_unknown_mode",
+                    tool=t.name,
+                    service="gateway-proxy",
+                )
         return visible

@@ -40,15 +40,21 @@ def clear_tools(server: str) -> None:
     TOOL_REGISTRY.pop(server, None)
 
 
-def get_tool_mode(server: str, tool: str) -> str:
-    """Return 'read' or 'write' for a server's tool. Defaults to 'read'."""
-    return TOOL_REGISTRY.get(server, {}).get(tool, "read")
+def get_tool_mode(server: str, tool: str) -> str | None:
+    """Return 'read'/'write' for a server's tool; None if unknown (fail-closed).
+
+    为什么不再默认 'read'：mode 元数据缺失时把未知工具当 read 判定是
+    fail-open——历史越权 bug 的路径（只读 token 访问未知 write 工具）。
+    授权层（authorization._lookup_mode）对 None 诚实拒绝（unknown_mode）。
+    """
+    return TOOL_REGISTRY.get(server, {}).get(tool)
 
 
-def resolve_target(mcp_name: str) -> tuple[str, str, str]:
+def resolve_target(mcp_name: str) -> tuple[str, str, str | None]:
     """Resolve a namespaced tool name to (server, tool, mode).
 
     Raises UnknownServerError if the server prefix is not registered.
+    mode is None when the tool is not in TOOL_REGISTRY (fail-closed).
     """
     server, tool = split_prefix(mcp_name)
     if server not in TOOL_REGISTRY:

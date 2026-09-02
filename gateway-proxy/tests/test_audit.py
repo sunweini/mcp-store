@@ -25,9 +25,14 @@ async def test_record_call_stream_xadds_success(fake_redis):
 
 
 def test_error_types_are_the_documented_enum():
-    """error_type 是管理前端错误类型 chips 的受限枚举，语义不变。"""
+    """error_type 是管理前端错误类型 chips 的受限枚举，语义不变。
+
+    invalid_target / unknown_mode 为 fail-closed 语义新增（ADR-0001 +
+    候选5）：名字无法解析 / mode 未注册。
+    """
     assert set(ERROR_TYPES) == {
         "upstream_timeout", "permission_denied", "invalid_token",
+        "invalid_target", "unknown_mode",
         "upstream_error", "connection_error",
     }
 

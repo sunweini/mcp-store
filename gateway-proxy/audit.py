@@ -15,10 +15,13 @@ from redis_client import get_redis
 logger = structlog.get_logger()
 
 # NOTE: bounded enum consumed by the admin frontend's error-type chips.
+# unknown_mode：mode 未知（fail-closed，工具未在 TOOL_REGISTRY 注册）。
 ERROR_TYPES = frozenset({
     "upstream_timeout",
     "permission_denied",
     "invalid_token",
+    "invalid_target",
+    "unknown_mode",
     "upstream_error",
     "connection_error",
 })
