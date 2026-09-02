@@ -29,15 +29,15 @@ from fastmcp.server.dependencies import get_http_headers
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from opentelemetry import trace
 
-from auth import verify_token, check_permission
-from middleware import (
+from auth import verify_token
+from authorization import authorize, get_tool_modes
+from audit import (
+    record_call_stream,
     build_journey,
     build_audit_meta,
-    check_call_permission,
     classify_error,
 )
-from audit import record_call_stream
-from routing import resolve_target, split_prefix, UnknownServerError
+from routing import split_prefix
 # CRITICAL: import the module (not `from observability import ...`) so that
 # attribute access resolves at CALL TIME, picking up the post-init_telemetry()
 # values. A `from` import snapshots the names at import time (all None, because
@@ -162,16 +162,29 @@ class PermissionMiddleware(Middleware):
                 token_info = None
 
         # ── Permission check ────────────────────────────────────────
-        allowed, error_type = check_call_permission(token_info, tool_name)
+        # authorize 是纯函数：permissions 由 token_info 注入（None = 无有效
+        # token），tool_modes 由 get_tool_modes() 从 TOOL_REGISTRY 快照注入。
+        # 一次解析出 server/tool/mode，供授权的放行/拒绝与后续审计共用。
+        authz = authorize(
+            token_info["permissions"] if token_info else None,
+            tool_name,
+            get_tool_modes(),
+        )
+        allowed = authz.allowed
+        error_type = authz.error_type
 
         if not allowed:
             latency_ms = int((time.monotonic() - start) * 1000)
+            # invalid_token → 认证阶段 fail；其余（invalid_target/permission_denied）
+            # → 路由阶段 fail。
             fail_stage = "auth" if error_type == "invalid_token" else "route"
             message = f"Denied: {tool_name}"
             # 单次 XADD 记录审计条目（含失败）：message + journey 进 stream，
             # 消费者落 MySQL 时失败面板的「错误信息 / 查看轨迹」直接可用
             await record_call_stream(
-                meta=build_audit_meta(token_info, tool_name, latency_ms, trace_id),
+                meta=build_audit_meta(
+                    token_info, authz.server, authz.tool, authz.mode, latency_ms, trace_id
+                ),
                 status="fail",
                 error_type=error_type,
                 message=message,
@@ -205,7 +218,9 @@ class PermissionMiddleware(Middleware):
                 # 超时计入审计（upstream_timeout），与 httpx 超时同分类
                 message = f"Backend timeout after {timeout}s"
                 await record_call_stream(
-                    meta=build_audit_meta(token_info, tool_name, latency_ms, trace_id),
+                    meta=build_audit_meta(
+                        token_info, authz.server, authz.tool, authz.mode, latency_ms, trace_id
+                    ),
                     status="fail",
                     error_type="upstream_timeout",
                     message=message,
@@ -222,7 +237,9 @@ class PermissionMiddleware(Middleware):
                 fail_stage = tool_name.split("_", 1)[0] if "_" in tool_name else "backend"
                 message = str(exc)
                 await record_call_stream(
-                    meta=build_audit_meta(token_info, tool_name, latency_ms, trace_id),
+                    meta=build_audit_meta(
+                        token_info, authz.server, authz.tool, authz.mode, latency_ms, trace_id
+                    ),
                     status="fail",
                     error_type=err_type,
                     message=message,
@@ -242,7 +259,9 @@ class PermissionMiddleware(Middleware):
 
         # 成功也写流：请求日志页需要全量调用明细（不止失败）
         await record_call_stream(
-            meta=build_audit_meta(token_info, tool_name, latency_ms, trace_id),
+            meta=build_audit_meta(
+                token_info, authz.server, authz.tool, authz.mode, latency_ms, trace_id
+            ),
             status="ok",
             error_type=None,
             message="",
@@ -292,14 +311,12 @@ class PermissionMiddleware(Middleware):
             return []
 
         visible = []
+        tool_modes = get_tool_modes()
+        permissions = token_info["permissions"]
         for t in tools:
-            try:
-                server, _tool, mode = resolve_target(t.name)
-            except (ValueError, UnknownServerError):
-                # ValueError = 无下划线前缀，UnknownServerError = 未注册前缀。
-                # 来源无法确定时安全默认不列出（与 check_call_permission 的
-                # 捕获语义对齐，避免 tools/list 因畸形工具名 500）
-                continue
-            if check_permission(token_info, server, mode):
+            # 走同一个 authorize seam：只取 allowed（list 只需"是否可见"，
+            # 拒绝原因不重要——跳过该工具即可）。畸形/未注册前缀的授权失败
+            # 会被 safely 跳过，避免 tools/list 因工具名 500。
+            if authorize(permissions, t.name, tool_modes).allowed:
                 visible.append(t)
         return visible

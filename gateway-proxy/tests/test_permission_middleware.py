@@ -2,24 +2,34 @@
 
 Mocks call_next to simulate the backend; verifies that allowed calls pass
 through and denied calls raise ToolError + write an audit record.
+
+(Q12) 授权 seam 后：不再手动 register/clear 全局 TOOL_REGISTRY，改为
+monkeypatch permission_middleware.get_tool_modes 注入固定的 tool_modes——
+authorize 是纯函数，hook 测试不再污染全局。
 """
 import pytest
 
 from fastmcp.exceptions import ToolError
 
 from permission_middleware import PermissionMiddleware, _extract_token, _current_trace_id
-from routing import register_tools, clear_tools
+
+
+# 固定的 mode 表（与旧 register_tools 注入的 zabbix 工具一致）
+_TOOL_MODES = {
+    "zabbix": {"list_active_problems": "read", "create_maintenance": "write"},
+    "tavily": {"tavily_search": "read"},
+}
 
 
 @pytest.fixture(autouse=True)
-def register_zabbix_tools():
-    """Register zabbix server with read + write tools so resolve_target works."""
-    register_tools("zabbix", [
-        {"name": "list_active_problems", "mode": "read"},
-        {"name": "create_maintenance", "mode": "write"},
-    ])
+def register_zabbix_tools(monkeypatch):
+    """注入固定的 tool_modes 给 permission_middleware.get_tool_modes。
+
+    旧版直接 register_tools 写全局 TOOL_REGISTRY——授权 seam 后改为数据注入，
+    测试不再污染全局（也省去 clear 清理）。
+    """
+    monkeypatch.setattr("permission_middleware.get_tool_modes", lambda: _TOOL_MODES)
     yield
-    clear_tools("zabbix")
 
 
 class FakeMessage:
@@ -317,24 +327,24 @@ async def test_list_tools_read_write_sees_all(fake_redis, monkeypatch):
 
 
 async def test_list_tools_multi_server_mixed_permissions(fake_redis, monkeypatch):
-    """多 server 混合：各自按权限过滤后合并。"""
-    register_tools("tavily", [{"name": "tavily_search", "mode": "read"}])
-    try:
-        await _seed_token(fake_redis, "tok_mix", {
-            "zabbix": {"read": True, "write": False},
-            "tavily": {"read": True, "write": True},
-        })
-        monkeypatch.setattr(
-            "permission_middleware.get_http_headers",
-            lambda include=None: {"authorization": "Bearer tok_mix"},
-        )
-        tools = _full_tool_list() + [FakeTool("tavily_tavily_search")]
-        mw = PermissionMiddleware()
-        result = await mw.on_list_tools(FakeContext("x"), lambda ctx: tools)
-        names = {t.name for t in result}
-        assert names == {"zabbix_list_active_problems", "tavily_tavily_search"}
-    finally:
-        clear_tools("tavily")
+    """多 server 混合：各自按权限过滤后合并。
+
+    tavily 的 mode 表由 autouse fixture 注入（_TOOL_MODES），无需再
+    register_tools 写全局。
+    """
+    await _seed_token(fake_redis, "tok_mix", {
+        "zabbix": {"read": True, "write": False},
+        "tavily": {"read": True, "write": True},
+    })
+    monkeypatch.setattr(
+        "permission_middleware.get_http_headers",
+        lambda include=None: {"authorization": "Bearer tok_mix"},
+    )
+    tools = _full_tool_list() + [FakeTool("tavily_tavily_search")]
+    mw = PermissionMiddleware()
+    result = await mw.on_list_tools(FakeContext("x"), lambda ctx: tools)
+    names = {t.name for t in result}
+    assert names == {"zabbix_list_active_problems", "tavily_tavily_search"}
 
 
 async def test_list_tools_unregistered_prefix_skipped(fake_redis, monkeypatch):

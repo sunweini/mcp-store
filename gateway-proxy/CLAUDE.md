@@ -32,6 +32,12 @@ MCP 网关代理。聚合后端 MCP server，token 认证，读写权限控制�
 - 排查：出现"只 read 权限却看到/调用 write 工具"，先查 proxy 日志
   `introspect_failed` / `introspect_empty_keep_last_tools`，多半是 TOOL_REGISTRY 被
   一次瞬时故障污染，重启 proxy 重新 introspect 即恢复。
+- **模块归位（2026-09，ADR-0001）**：授权判定在 `authorization.py`
+  （`authorize(permissions, mcp_name, tool_modes) -> AuthResult`，纯函数、tool_modes
+  由 `get_tool_modes()` 注入）；审计构造在 `audit.py`（build_audit_meta /
+  build_journey / classify_error / ERROR_TYPES）；`middleware.py` 已删除。
+  `on_call_tool`/`on_list_tools`（permission_middleware.py）把 `AuthResult` 的
+  server/tool/mode 传给审计，不再各自解析 TOOL_REGISTRY。
 
 ## 本地开发
 ```bash
