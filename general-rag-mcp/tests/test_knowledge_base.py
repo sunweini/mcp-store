@@ -4,6 +4,8 @@ Covers search 正常解析 / degraded+gap_warning 透传 / 空 query 报错 /
 namespace 缺省、namespaces/health 正常路径、ingest 参数校验、以及
 rag_client 的 503 退避与 400 不重试。
 """
+import base64
+
 import pytest
 from structlog.testing import capture_logs
 
@@ -19,6 +21,8 @@ from tools.knowledge_base import (
     knowledge_base_golden_add,
     knowledge_base_delete_document,
     DEFAULT_NAMESPACE,
+    MAX_MEDIA_BYTES,
+    MAX_MEDIA_COUNT,
 )
 
 
@@ -52,11 +56,44 @@ async def test_search_returns_structured_result(fake_client):
         query="怎么获取token", namespace="stamp-project", client=fake_client
     )
 
-    assert result["status"] == "ok"
-    assert result["answer"].startswith("先调")
-    assert result["sources"][0]["doc_id"].endswith("02_概述与获取token接口.md")
-    assert result["degraded"] is False
-    assert result["gap_warning"] is None
+    sc = result.structured_content
+    assert sc["status"] == "ok"
+    assert sc["answer"].startswith("先调")
+    assert sc["sources"][0]["doc_id"].endswith("02_概述与获取token接口.md")
+    assert sc["degraded"] is False
+    assert sc["gap_warning"] is None
+    # 无图 source → 只有文本 content 块，无 image 块。
+    assert all(b.type == "text" for b in result.content)
+
+
+async def test_search_passes_images_through(fake_client):
+    """source 的 images 字段透传（§4.3），空数组正常返回不报错。"""
+    fake_client.search_result = {
+        "sources": [
+            {
+                "title": "t",
+                "doc_id": "imgtest-mcp/imgtest-mcp.md",
+                "engine": "vector",
+                "images": ["/api/v1/media/imgtest-mcp/imgtest-mcp_assets/img0.png"],
+            }
+        ],
+        "degraded": False,
+    }
+
+    result = await knowledge_base_search(query="q", namespace="imgtest-mcp", client=fake_client)
+
+    assert result.structured_content["sources"][0]["images"] == [
+        "/api/v1/media/imgtest-mcp/imgtest-mcp_assets/img0.png"
+    ]
+
+
+async def test_search_images_absent_defaults_empty(fake_client):
+    """backend 未带 images 或缺省 → []，不报错。"""
+    fake_client.search_result = {"sources": [{"title": "t", "doc_id": "x.md"}], "degraded": False}
+
+    result = await knowledge_base_search(query="q", client=fake_client)
+
+    assert result.structured_content["sources"][0]["images"] == []
 
 
 async def test_search_defaults_namespace(fake_client):
@@ -92,8 +129,8 @@ async def test_search_passes_filters_through(fake_client):
 
 async def test_search_empty_query_returns_error(fake_client):
     result = await knowledge_base_search(query="   ", client=fake_client)
-    assert result["status"] == "error"
-    assert "不能为空" in result["message"]
+    assert result.structured_content["status"] == "error"
+    assert "不能为空" in result.structured_content["message"]
 
 
 async def test_search_transparently_passes_degraded_and_gap_warning(fake_client):
@@ -108,9 +145,10 @@ async def test_search_transparently_passes_degraded_and_gap_warning(fake_client)
 
     result = await knowledge_base_search(query="q", client=fake_client)
 
-    assert result["degraded"] is True
-    assert result["missing_components"] == ["rerank"]
-    assert result["gap_warning"] == "知识库可能覆盖不足"
+    sc = result.structured_content
+    assert sc["degraded"] is True
+    assert sc["missing_components"] == ["rerank"]
+    assert sc["gap_warning"] == "知识库可能覆盖不足"
 
 
 async def test_search_rag_error_400_hints_namespace(fake_client):
@@ -118,8 +156,100 @@ async def test_search_rag_error_400_hints_namespace(fake_client):
 
     result = await knowledge_base_search(query="q", client=fake_client)
 
-    assert result["status"] == "error"
-    assert "knowledge_base_namespaces" in result["message"]
+    sc = result.structured_content
+    assert sc["status"] == "error"
+    assert "knowledge_base_namespaces" in sc["message"]
+
+
+# ── knowledge_base_search 内嵌 image content 块 ────────────────────────────────
+
+
+async def test_search_embeds_image_content_block(fake_client):
+    """source.images 命中 → content 里出现 image 块（base64 + mime 从扩展名推断）。"""
+    fake_client.search_result = {
+        "sources": [
+            {
+                "title": "t",
+                "doc_id": "imgtest-mcp/imgtest-mcp.md",
+                "images": ["/api/v1/media/imgtest-mcp/imgtest-mcp_assets/img0.png"],
+            }
+        ],
+        "degraded": False,
+    }
+    fake_client.media_result = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
+    result = await knowledge_base_search(query="q", namespace="imgtest-mcp", client=fake_client)
+
+    image_blocks = [b for b in result.content if b.type == "image"]
+    assert len(image_blocks) == 1
+    assert image_blocks[0].mime_type == "image/png"
+    assert base64.b64decode(image_blocks[0].data) == fake_client.media_result
+
+
+async def test_search_media_fetch_failure_degrades(fake_client):
+    """拉图失败 → 该图降级回 URL，不报错、无 image 块。"""
+    fake_client.search_result = {
+        "sources": [
+            {
+                "title": "t",
+                "doc_id": "imgtest-mcp/imgtest-mcp.md",
+                "images": ["/api/v1/media/imgtest-mcp/imgtest-mcp_assets/img0.png"],
+            }
+        ],
+        "degraded": False,
+    }
+    fake_client.media_error = RagError("404", status_code=404)
+
+    result = await knowledge_base_search(query="q", namespace="imgtest-mcp", client=fake_client)
+
+    assert all(b.type == "text" for b in result.content)
+    # URL 仍在 structured 里作文本降级。
+    assert result.structured_content["sources"][0]["images"]
+
+
+async def test_search_media_oversize_degrades(fake_client):
+    """单张 >MAX_MEDIA_BYTES → 跳过，不报错。"""
+    fake_client.search_result = {
+        "sources": [
+            {
+                "title": "t",
+                "doc_id": "imgtest-mcp/imgtest-mcp.md",
+                "images": ["/api/v1/media/imgtest-mcp/imgtest-mcp_assets/img0.png"],
+            }
+        ],
+        "degraded": False,
+    }
+    fake_client.media_result = b"x" * (MAX_MEDIA_BYTES + 1)
+
+    result = await knowledge_base_search(query="q", namespace="imgtest-mcp", client=fake_client)
+
+    assert [b for b in result.content if b.type == "image"] == []
+
+
+async def test_search_media_respects_count_cap(fake_client):
+    """最多返回 MAX_MEDIA_COUNT 张，多的只保留 URL。"""
+    urls = [f"/api/v1/media/ns/doc_assets/img{i}.png" for i in range(5)]
+    fake_client.search_result = {
+        "sources": [
+            {"title": "t", "doc_id": "imgtest-mcp/imgtest-mcp.md", "images": urls},
+        ],
+        "degraded": False,
+    }
+    fake_client.media_result = b"\x89PNG\x00"
+
+    result = await knowledge_base_search(query="q", namespace="imgtest-mcp", client=fake_client)
+
+    image_blocks = [b for b in result.content if b.type == "image"]
+    assert len(image_blocks) == MAX_MEDIA_COUNT
+
+
+async def test_search_images_absent_produce_no_image_block(fake_client):
+    """无 images → content 只有文本块。"""
+    fake_client.search_result = {"sources": [{"title": "t", "doc_id": "x.md"}], "degraded": False}
+
+    result = await knowledge_base_search(query="q", client=fake_client)
+
+    assert all(b.type == "text" for b in result.content)
 
 
 # ── knowledge_base_namespaces / health ──────────────────────────────────────────

@@ -61,6 +61,8 @@ class RagClient:
     def __init__(self, base_url: str, timeout: float = 60.0):
         # NOTE: 去掉末尾斜杠避免后续拼接出现双斜杠；base_url 已含 /api/v1。
         self._base_url = base_url.rstrip("/")
+        # origin = 去掉 /api/v1 后缀，用于拼媒体等已是全路径的 URL（如 /api/v1/media/...）。
+        self._origin = self._base_url.removesuffix("/api/v1")
         self._timeout = timeout
         self._http = httpx.AsyncClient(timeout=timeout)
 
@@ -239,6 +241,31 @@ class RagClient:
         if filename:
             payload["filename"] = filename
         return await self._request("POST", "/delete", json=payload, retryable=False)
+
+    # ── 媒体（取证路由，白名单图片） ─────────────────────────────
+
+    async def get_media(self, url: str) -> bytes:
+        """GET /api/v1/media/<relpath> — 拉取图片字节（取证路由）。
+
+        media URL 已是全路径（含 /api/v1，如 /api/v1/media/<ns>/<stem>_assets/img0.png），
+        用 _origin（去 /api/v1 后缀）拼接，避免双写 /api/v1。图片是可选增值：失败
+        抛 RagError/RagConnectionError，由上一级降级回 URL，不阻断主检索。
+        """
+        full = (self._origin + url) if url.startswith("/api/v1") else (self._base_url.rstrip("/") + url)
+        try:
+            resp = await self._http.get(full, timeout=self._timeout)
+        except httpx.HTTPError as e:
+            raise RagConnectionError(f"media 拉取连接失败: {e}") from e
+        if resp.status_code == 200:
+            return resp.content
+        logger.warning(
+            "rag_api_media_missing",
+            service="general-rag-mcp",
+            path=url,
+            status_code=resp.status_code,
+        )
+        # 越权/不存在在同一端点按 404 处理（契约：白名单图片，越权 404）。
+        raise RagError(f"media 拉取失败 HTTP {resp.status_code}", resp.status_code)
 
     # ── 底层请求 ───────────────────────────────────────────────────
 

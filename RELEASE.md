@@ -2,6 +2,43 @@
 
 本仓库版本更新记录。每个里程碑记录：变更内容、影响范围、升级/部署注意事项、回滚方式。
 
+## v1.4.1 — general-rag-mcp search 返回可渲染图片（2026-09-09）
+
+**目标**：`knowledge_base_search` 把 `source.images`（§4.3 图片 URL）拉字节转成 MCP `image` content 块随回答返回，客户端原生渲染；不再只给裸 URL 字符串。
+
+### 变更内容
+
+| 变更 | 说明 |
+|---|---|
+| `knowledge_base_search` 返图 | `content=[TextContent(答案), ImageContent(...)]` + `structured_content=<原 dict>`，结构化字段不变 |
+| 边界 | 单张 >2MB / 拉取失败 → 降级回 URL（留在 sources[].images，不报错）；最多前 3 张 |
+| RagClient.get_media | GET `/api/v1/media/<relpath>`（取证路由 §5.6，白名单图片，越权 404）；用 `_origin`（base_url 去 /api/v1）拼全路径避免双写 /api/v1 |
+| mime 推断 | 按 URL 扩展名 → image/png | jpeg | gif | webp 等，未知回退 png |
+
+### 影响范围
+
+- 仅 general-rag-mcp 的 `knowledge_base_search` 返回形态增强；参数、工具名、gateway 转发不变。
+- 后端 general-rag 已上线 `/media` 取证路由，无需后端改动。
+
+### 部署注意事项
+
+1. 重建 general-rag-mcp 容器：`docker compose build general-rag-mcp && docker compose up -d general-rag-mcp`。
+2. 需与后端 `/api/v1/media` 连通（白名单图片）；越权/不存在按 404 → 该图降级回 URL。
+
+### 回滚
+
+```bash
+docker compose rm -sf general-rag-mcp
+# 或 git 回退 general-rag-mcp/ 目录后重建
+```
+
+### 验证证据
+
+- general-rag-mcp 46 用例全绿。
+- live 冒烟（imgtest-mcp）：MCP `tools/call` 返回 `image` content 块（mimeType=image/png，base64 PNG），`GET /api/v1/media/...` → 200 image/png。
+
+---
+
 ## v1.4.0 — general-rag-mcp golden 生长+删除 三工具（2026-09-09）
 
 **目标**：补 general-rag-mcp 的 golden 集生长（两步确认）与文档删除（三步流 + golden_impact）三工具，对应 general-rag issue #6 契约 §8 tool 4/6。

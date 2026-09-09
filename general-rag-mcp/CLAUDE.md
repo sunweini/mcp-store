@@ -27,7 +27,7 @@ MCP Client → FastMCP (streamable-http, stateless) → tools/knowledge_base.py
 
 | Tool | 类型 | 超时 | 重试 | 说明 |
 |---|---|---|---|---|
-| `knowledge_base_search` | 读 | 60s | 503 退避 1s/2s/4s ×3 | 核心检索 |
+| `knowledge_base_search` | 读 | 60s | 503 退避 1s/2s/4s ×3 | 核心检索；命中图转可渲染 `image` content 块（≤3 张，超限/失败降级 URL） |
 | `knowledge_base_namespaces` | 读 | 60s | 503 退避 | 列出 namespace |
 | `knowledge_base_health` | 读 | 60s | 503 退避 | 组件状态 |
 | `knowledge_base_golden_suggest` | 读 | 60s | 502/空 candidates ≥5s×3（自持） | 反推问法初稿；404 红线不重试 |

@@ -8,7 +8,7 @@ general-rag 知识库（章管家接口文档等），返回可置信、带来�
 
 | Tool | 类型 | 说明 |
 |---|---|---|
-| `knowledge_base_search` | 读 | 检索问答（核心）；namespace 缺省 stamp-project，支持 doc_type/tags/categories/use_graph 过滤 |
+| `knowledge_base_search` | 读 | 检索问答（核心）；namespace 缺省 stamp-project，支持 doc_type/tags/categories/use_graph 过滤；命中图转可渲染 `image` content 块 |
 | `knowledge_base_namespaces` | 读 | 列出可用命名空间，供 search 校验/提示 |
 | `knowledge_base_health` | 读 | 探测组件状态（es/neo4j/llm/embedding/rerank） |
 | `knowledge_base_ingest` | **写** | 上传文件摄入（docx/pdf/pptx/txt/md，≤20MB）——⚠️ 仅限 <5KB 小文件 |

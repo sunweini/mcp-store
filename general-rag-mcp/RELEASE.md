@@ -57,6 +57,14 @@ docker compose up -d general-rag-mcp
 
 ## Changelog
 
+### 0.4.0（2026-09-09）
+
+- `knowledge_base_search` 返回**可渲染图片**：`source.images`（§4.3 图片 URL）拉字节转成 MCP `image` content 块随回答返回，客户端原生渲染；不再只是裸 URL 字符串。
+- **边界**：单张 >2MB、拉取失败（404/网络）→ 该图降级回 URL（留在 `sources[].images`，作文本降级，不报错）；最多返回前 3 张，多的只保留 URL。
+- **实现**：`RagClient.get_media(url)` GET `/api/v1/media/<relpath>`（取证路由，白名单图片 / §5.6；用 `_origin` 去 `/api/v1` 后缀拼全路径）；`mimeType` 从图扩展名推断。`knowledge_base_search` 改用 `ToolResult(content=[TextContent(answer), ImageContent(...)], structured_content=<原dict>)`——结构化字段不变，仅 content 新增 image 块。
+- `rag_client` 新增 `get_media`（非 200 抛 RagError）；`_origin` 在 `__init__` 由 base_url 去掉 `/api/v1` 派生。
+- **测试**：39→46（images 透传、image 块生成、≤3 张上限、>2MB 降级、拉取失败降级、mime 推断、无图仅文本块）。
+
 ### 0.3.0（2026-09-09）
 
 - 新增 3 工具：`knowledge_base_golden_suggest`（只读，反推问法初稿）、`knowledge_base_golden_add`（写，两步确认写入 /golden/cases）、`knowledge_base_delete_document`（写，三步流删除 + golden_impact 警示）。对应 general-rag issue #6 契约 §8 tool 4/6。

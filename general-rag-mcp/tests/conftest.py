@@ -33,6 +33,8 @@ class FakeClient:
         self.golden_suggest_error = None
         self.golden_add_error = None
         self.delete_error = None
+        self.media_result = b""
+        self.media_error = None
 
     async def search(self, **kwargs):
         self.search_calls.append(kwargs)
@@ -77,6 +79,13 @@ class FakeClient:
         if self.delete_error:
             raise self.delete_error
         return self.delete_result
+
+    async def get_media(self, url):
+        self.get_media_calls = getattr(self, "get_media_calls", [])
+        self.get_media_calls.append(url)
+        if self.media_error:
+            raise self.media_error
+        return self.media_result
 
 
 def _make_response(status_code, body):

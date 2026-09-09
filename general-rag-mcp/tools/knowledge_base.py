@@ -8,8 +8,11 @@
 隐私约束（指南 §3）：sources 的 snippet 截断（rag_client.truncate），
 日志不转储完整文档内容。
 """
+import base64
+
 from fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent, ImageContent, ToolAnnotations
 import structlog
 
 from rag_client import RagClient, RagError, RagConnectionError, truncate
@@ -18,6 +21,55 @@ logger = structlog.get_logger()
 
 # NOTE: 指南 §8 的 doc_type 枚举六值。逐字段照搬，后端做最终校验。
 _DOC_TYPES = ("guide", "manual", "sop", "reference", "note", "faq")
+
+# 内嵌图边界：避免一次吐几十张高清图撑爆会话。单张超限/拉取失败 → 降级回 URL
+# （URL 留在 sources[].images，作文本降级）；最多返回前 N 张，多的只保留 URL。
+MAX_MEDIA_COUNT = 3
+MAX_MEDIA_BYTES = 2 * 1024 * 1024
+_MIME_BY_EXT = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "bmp": "image/bmp",
+    "svg": "image/svg+xml",
+    "tiff": "image/tiff",
+}
+
+
+def _mime_from_url(url: str) -> str:
+    """按 URL 扩展名推断 image mimeType；未知回退 image/png。"""
+    ext = url.rsplit(".", 1)[-1].lower() if "." in url else ""
+    return _MIME_BY_EXT.get(ext, "image/png")
+
+
+async def _fetch_image_content(client: RagClient, url: str) -> ImageContent | None:
+    """拉一张图并转成 MCP image content 块；拉取失败或超限返回 None（降级回 URL）。
+
+    图片是可选增值：绝不因拉图失败阻断主检索，也不报错。
+    """
+    if client is None:
+        return None
+    try:
+        data = await client.get_media(url)
+    except (RagError, RagConnectionError):
+        return None
+    if not data or len(data) > MAX_MEDIA_BYTES:
+        return None
+    return ImageContent(
+        type="image",
+        data=base64.b64encode(data).decode("ascii"),
+        mime_type=_mime_from_url(url),
+    )
+
+
+def _search_error(message: str) -> ToolResult:
+    """把 search 的错误态统一包成 ToolResult（content=文本错误，structured=error dict）。"""
+    return ToolResult(
+        content=[TextContent(type="text", text=message)],
+        structured_content={"status": "error", "message": message},
+    )
 
 # 缺省 namespace：当前生产唯一命名空间。指南 §7.1 要求"总是显式传
 # namespace"，缺失时落到 stamp-project 而非可能被禁的 default。
@@ -38,17 +90,20 @@ async def knowledge_base_search(
     use_graph: bool = True,
     *,
     client: RagClient | None = None,
-) -> dict:
+) -> ToolResult:
     """检索内部知识库（章管家接口文档等）并返回带来源标记的答案。
 
     必须指定 namespace（缺省 stamp-project）。返回 answer + sources[] +
     degraded + gap_warning。当 degraded=true 或 gap_warning 非空时如实
     告知用户，不要臆测补充。
+
+    sources[].images 里命中的图会拉字节转成 MCP image content 块随回答返回
+    （客户端原生渲染）；单张 >2MB 或拉取失败降级回 URL 文本，最多返回 3 张。
     """
     if client is None:
-        return {"status": "error", "message": "rag client not initialized"}
+        return _search_error("rag client not initialized")
     if not query or not query.strip():
-        return {"status": "error", "message": "query 不能为空"}
+        return _search_error("query 不能为空")
 
     try:
         result = await client.search(
@@ -65,12 +120,9 @@ async def knowledge_base_search(
         hint = ""
         if e.status_code == 400:
             hint = "（可能是 namespace 非法或被禁用，请先用 knowledge_base_namespaces 确认）"
-        return {"status": "error", "message": f"{e}{hint}"}
+        return _search_error(f"{e}{hint}")
     except RagConnectionError as e:
-        return {
-            "status": "error",
-            "message": f"知识库服务暂不可用：{e}，请稍后重试",
-        }
+        return _search_error(f"知识库服务暂不可用：{e}，请稍后重试")
 
     # 截断 snippet（隐私），保留结构化来源字段供 agent 引用。
     sources = []
@@ -84,10 +136,12 @@ async def knowledge_base_search(
             "confidence_basis": s.get("confidence_basis"),
             "source_path": s.get("source_path"),
             "doc_type": s.get("doc_type"),
+            # images：该 chunk 关联的图片 URL 列表（§4.3），空数组=无图，直接透传。
+            "images": s.get("images") or [],
             "snippet": truncate(s.get("snippet")),
         })
 
-    return {
+    ok_result = {
         "status": "ok",
         "answer": result.get("answer"),
         "sources": sources,
@@ -97,6 +151,25 @@ async def knowledge_base_search(
         "missing_components": result.get("missing_components", []),
         "gap_warning": result.get("gap_warning"),
     }
+
+    # 内嵌可渲染图（客户端 image content 块）：按命中顺序，最多 MAX_MEDIA_COUNT 张，
+    # 单张 ≤MAX_MEDIA_BYTES；拉取失败/超限降级回 URL（URL 已留在 sources[].images）。
+    image_blocks = []
+    for s in sources:
+        if len(image_blocks) >= MAX_MEDIA_COUNT:
+            break
+        for img_url in s.get("images") or []:
+            if len(image_blocks) >= MAX_MEDIA_COUNT:
+                break
+            block = await _fetch_image_content(client, img_url)
+            if block is not None:
+                image_blocks.append(block)
+
+    text = result.get("answer") or "（无答案）"
+    return ToolResult(
+        content=[TextContent(type="text", text=text), *image_blocks],
+        structured_content=ok_result,
+    )
 
 
 async def knowledge_base_namespaces(*, client: RagClient | None = None) -> dict:
