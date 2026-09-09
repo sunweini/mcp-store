@@ -23,8 +23,16 @@ class FakeClient:
         self.namespaces_result = []
         self.health_result = {}
         self.ingest_result = {}
+        self.ingest_path_result = {}
+        self.golden_suggest_result = {}
+        self.golden_add_result = {}
+        self.delete_result = {}
         self.search_error = None
         self.search_calls = []
+        self.ingest_path_error = None
+        self.golden_suggest_error = None
+        self.golden_add_error = None
+        self.delete_error = None
 
     async def search(self, **kwargs):
         self.search_calls.append(kwargs)
@@ -41,6 +49,34 @@ class FakeClient:
 
     async def ingest(self, **kwargs):
         return self.ingest_result
+
+    async def ingest_path(self, **kwargs):
+        self.ingest_path_calls = getattr(self, "ingest_path_calls", [])
+        self.ingest_path_calls.append(kwargs)
+        if getattr(self, "ingest_path_error", None):
+            raise self.ingest_path_error
+        return self.ingest_path_result
+
+    async def golden_suggest(self, **kwargs):
+        self.golden_suggest_calls = getattr(self, "golden_suggest_calls", [])
+        self.golden_suggest_calls.append(kwargs)
+        if self.golden_suggest_error:
+            raise self.golden_suggest_error
+        return self.golden_suggest_result
+
+    async def golden_add(self, **kwargs):
+        self.golden_add_calls = getattr(self, "golden_add_calls", [])
+        self.golden_add_calls.append(kwargs)
+        if self.golden_add_error:
+            raise self.golden_add_error
+        return self.golden_add_result
+
+    async def delete_document(self, **kwargs):
+        self.delete_calls = getattr(self, "delete_calls", [])
+        self.delete_calls.append(kwargs)
+        if self.delete_error:
+            raise self.delete_error
+        return self.delete_result
 
 
 def _make_response(status_code, body):

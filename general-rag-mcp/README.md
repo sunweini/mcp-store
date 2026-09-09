@@ -11,7 +11,13 @@ general-rag 知识库（章管家接口文档等），返回可置信、带来�
 | `knowledge_base_search` | 读 | 检索问答（核心）；namespace 缺省 stamp-project，支持 doc_type/tags/categories/use_graph 过滤 |
 | `knowledge_base_namespaces` | 读 | 列出可用命名空间，供 search 校验/提示 |
 | `knowledge_base_health` | 读 | 探测组件状态（es/neo4j/llm/embedding/rerank） |
-| `knowledge_base_ingest` | **写** | 上传文件摄入（docx/pdf/pptx/txt/md，≤20MB） |
+| `knowledge_base_ingest` | **写** | 上传文件摄入（docx/pdf/pptx/txt/md，≤20MB）——⚠️ 仅限 <5KB 小文件 |
+| `knowledge_base_ingest_file` | **写** | 按服务器路径摄入大文件（**20KB+ 首选**：file_bytes 会被 LLM 工具调用输出截断，路径方式永不截断） |
+| `knowledge_base_golden_suggest` | 读 | 摄入新文档后**反推问法初稿**（1-2 条口语问法 + 负样本候选）；仅供展示，不得直接写入（两步确认第一步） |
+| `knowledge_base_golden_add` | **写** | 两步确认第二步：写入 golden case（`source="mcp"`）；用户确认后才可调用 |
+| `knowledge_base_delete_document` | **写** | 三步流删除：`dry_run=true` 预览（含 `golden_impact`）→ 用户确认 → `dry_run=false` 真删；删后提醒悬空 case |
+
+> **golden/delete 工具已实现**（对应 general-rag issue #6 契约 §8 tool 4/6）。golden 集生长走两步确认（反推初稿 → 用户点头 → 写入），文档删除走三步流（预览 → 确认 → 真删）；写操作确认永远在调用方，工具只执行与如实返回。
 
 ## 快速开始
 

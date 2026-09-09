@@ -31,3 +31,37 @@ _Avoid_: 鉴权、授权检查
 **Audit record**:
 一次工具调用的审计记录（成功+失败全量），写入 `audit:calls` stream，由 admin 消费者落库到 MySQL calls 表。
 _Avoid_: 调用日志、审计条目
+
+## general-rag: golden 集（检索回归尺子）
+
+**Golden case**:
+检索质量回归尺子的一条用例 = 口语问法 + 期望命中 doc_id + 库内负样本断言。存后端服务器，经 `/golden/*` REST API 读写。
+_Avoid_: 回归用例、golden 用例
+
+**期望命中**:
+一条 golden case 的"标准答案"——该口语问法应命中的那条 doc_id。
+_Avoid_: 正确答案、ground truth
+
+**负样本**:
+case 里断言"不应命中"的 doc_id（须在库内），用于剔除过度召回。
+_Avoid_: 反例、负面样本
+
+**幽灵引用**:
+case 的期望命中或负样本 doc_id 已不在知识库（文档被删/迁移后悬空），后端拒收。
+_Avoid_: 悬空引用、孤儿引用（与删除后的 orphaned case 区分）
+
+**Golden_impact**:
+一次文档删除牵动的 golden case 数 + case_ids。只警告、绝不自动删 case。
+_Avoid_: 影响面、golden 影响
+
+**反推初稿**:
+`golden_suggest` 从一篇已摄入文档反推出的口语问法候选（golden 集生长的种子），仅供展示，不得直接写入。
+_Avoid_: 建议、草案
+
+**两步确认**:
+摄入生长惯例——反推初稿 → 维护者点头 → 才写入 golden 集。
+_Avoid_: 审核、审批流
+
+**三步流**:
+删除工具流程——dry_run 预览（含 golden_impact）→ 用户确认 → 真删；删后悬空 case 由人工另行清理。
+_Avoid_: 删除流程、确认流

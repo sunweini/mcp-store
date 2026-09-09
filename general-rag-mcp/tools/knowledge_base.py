@@ -172,6 +172,183 @@ async def knowledge_base_ingest(
     return {"status": "ok", **result}
 
 
+async def knowledge_base_ingest_file(
+    file_path: str,
+    namespace: str,
+    doc_type: str | None = None,
+    title: str | None = None,
+    tags: str | None = None,
+    categories: str | None = None,
+    *,
+    client: RagClient | None = None,
+) -> dict:
+    """按服务器端绝对路径摄入文件（推荐用于 20KB+ 大文件）。
+
+    🔧 大文件首选：file_bytes 参数要 LLM 在工具调用里生成完整内容，
+    20-44KB 内容会被模型输出限制截断（发生过多起：只入库文件开头
+    几百字符）。改用 file_path 后，工具参数只是一个短路径字符串，
+    内容在 MCP server 所在机器上由后端直接读取，永不截断。
+
+    ⚠️ 写操作 — 执行前必须向用户确认 namespace 与文件路径后再调用。
+
+    调用前提：文件已存在于 MCP server（后端 API）同一主机可读位置
+    （如 rsync 到 /opt/general-rag/ingest/<文件> 或 data 目录）。
+    namespace 不存在时默认会自动创建。
+    """
+    if client is None:
+        return {"status": "error", "message": "rag client not initialized"}
+    if not file_path or not file_path.strip():
+        return {"status": "error", "message": "file_path 不能为空"}
+
+    try:
+        result = await client.ingest_path(
+            file_path=file_path,
+            namespace=namespace,
+            doc_type=doc_type,
+            title=title,
+            tags=tags,
+            categories=categories,
+        )
+    except RagError as e:
+        return {"status": "error", "message": f"{e}（可能是路径不存在/格式不支持/扫描件）"}
+    except RagConnectionError as e:
+        return {"status": "error", "message": f"知识库服务暂不可用：{e}"}
+
+    return {"status": "ok", **result}
+
+
+async def knowledge_base_golden_suggest(
+    namespace: str,
+    doc_id: str,
+    *,
+    client: RagClient | None = None,
+) -> dict:
+    """反推 golden 问法初稿（只读，无副作用）——**仅用于摄入新文档后**。
+
+    返回 1-2 条口语问法 + 负样本候选，**仅供展示，不得直接写入**——两步确认的
+    初稿须经用户确认后才能走 knowledge_base_golden_add 落库。
+
+    LLM 偶发空内容时后端会 502，调用方应重试；本工具已做 >=5s 间隔 <=3 次重试，
+    仍失败则如实报错（不编造）。对"标题复读"式明显假问法（与文档标题几乎一样）
+    应提醒用户或建议弃用；文档不在库（404）时不产初稿（红线：不能硬凑）。
+    """
+    if client is None:
+        return {"status": "error", "message": "rag client not initialized"}
+    if not namespace or not namespace.strip():
+        return {"status": "error", "message": "namespace 不能为空"}
+    if not doc_id or not doc_id.strip():
+        return {"status": "error", "message": "doc_id 不能为空"}
+
+    try:
+        result = await client.golden_suggest(namespace=namespace, doc_id=doc_id)
+    except RagError as e:
+        if e.status_code == 404:
+            return {
+                "status": "error",
+                "message": "文档不在库，不能反推问法（红线：不为不在库的文档硬凑问法）",
+            }
+        if e.status_code == 502:
+            return {
+                "status": "error",
+                "message": "golden 问法反推暂不可用（LLM 多次重试仍失败），未编造；请稍后重试",
+            }
+        return {"status": "error", "message": str(e)}
+    except RagConnectionError as e:
+        return {"status": "error", "message": f"知识库服务暂不可用：{e}"}
+
+    return {"status": "ok", **result}
+
+
+async def knowledge_base_golden_add(
+    namespace: str,
+    doc_id: str,
+    query: str,
+    negatives: list[str] | None = None,
+    *,
+    client: RagClient | None = None,
+) -> dict:
+    """写入一条 golden case（**必走两步确认**）——⚠️ 写操作。
+
+    强制三步流（调用方须遵守）：
+    1. 先经 knowledge_base_golden_suggest（或调用方自拟初稿）；
+    2. **向用户展示初稿（问法 + 期望命中 + 负样本候选），获明确确认**——用户可改可删；
+    3. 确认后才调用本工具写入。
+
+    红线：禁止未经确认写入；禁止"标题复读"式假问法；问法的答案必须在该文档里
+    （超纲不写）。期望命中或负样本 doc_id 不在库会被后端拒收（幽灵引用）。
+    """
+    if client is None:
+        return {"status": "error", "message": "rag client not initialized"}
+    if not namespace or not namespace.strip():
+        return {"status": "error", "message": "namespace 不能为空"}
+    if not doc_id or not doc_id.strip():
+        return {"status": "error", "message": "doc_id 不能为空"}
+    if not query or not query.strip():
+        return {"status": "error", "message": "query 不能为空"}
+
+    # 防御性净化：negatives 非 list 置空，去空串负样本。幽灵引用语义校验交后端。
+    clean_negatives = []
+    if isinstance(negatives, list):
+        clean_negatives = [n for n in negatives if isinstance(n, str) and n.strip()]
+
+    try:
+        result = await client.golden_add(
+            namespace=namespace,
+            doc_id=doc_id,
+            query=query,
+            negatives=clean_negatives,
+        )
+    except RagError as e:
+        return {
+            "status": "error",
+            "message": f"{e}（可能是幽灵引用：期望命中或负样本 doc_id 不在库）",
+        }
+    except RagConnectionError as e:
+        return {"status": "error", "message": f"知识库服务暂不可用：{e}"}
+
+    return {"status": "ok", **result}
+
+
+async def knowledge_base_delete_document(
+    namespace: str,
+    doc_id: str | None = None,
+    filename: str | None = None,
+    dry_run: bool = True,
+    *,
+    client: RagClient | None = None,
+) -> dict:
+    """删除文档（**必走三步流**，真删不可逆）——⚠️ 写操作。
+
+    强制三步流（调用方须遵守）：
+    1. 先以 dry_run=true 预览，把将删清单**连同 golden_impact（牵动 N 条 golden
+       case）**展示给用户；
+    2. 用户明确确认后才 dry_run=false 真删；
+    3. 若 golden_impact.cases > 0：删除完成后**提醒用户**牵动的 case 已悬空，建议
+       后续经人工确认后用 golden case 删除端点清理（本工具不得自动删 case）。
+
+    禁止跳过预览直接真删。dry_run=true 的响应保留后端 status:"preview"（勿覆盖为 ok）。
+    参数 doc_id 与 filename 二选一（doc_id 优先）。
+    """
+    if client is None:
+        return {"status": "error", "message": "rag client not initialized"}
+    if not namespace or not namespace.strip():
+        return {"status": "error", "message": "namespace 不能为空"}
+    if not doc_id and not filename:
+        return {"status": "error", "message": "必须提供 doc_id 或 filename 之一"}
+
+    try:
+        result = await client.delete_document(
+            namespace=namespace, doc_id=doc_id, filename=filename, dry_run=dry_run
+        )
+    except RagError as e:
+        return {"status": "error", "message": str(e)}
+    except RagConnectionError as e:
+        return {"status": "error", "message": f"知识库服务暂不可用：{e}"}
+
+    # 不盲包 status:"ok"：dry_run=true 时后端返回 status:"preview"，原样透传。
+    return result
+
+
 # ── MCP registration ───────────────────────────────────────────────────────────
 
 
@@ -256,3 +433,82 @@ def register(mcp: FastMCP, get_client, metrics=None) -> None:
         description=knowledge_base_ingest.__doc__,
         annotations=ToolAnnotations(destructiveHint=True),
     )(_wrap("knowledge_base_ingest")(_mcp_ingest))
+
+    async def _mcp_ingest_file(
+        file_path: str,
+        namespace: str,
+        doc_type: str | None = None,
+        title: str | None = None,
+        tags: str | None = None,
+        categories: str | None = None,
+    ) -> dict:
+        return await knowledge_base_ingest_file(
+            file_path=file_path,
+            namespace=namespace,
+            doc_type=doc_type,
+            title=title,
+            tags=tags,
+            categories=categories,
+            client=get_client(),
+        )
+
+    _mcp_ingest_file.__doc__ = knowledge_base_ingest_file.__doc__
+    mcp.tool(
+        name="knowledge_base_ingest_file",
+        description=knowledge_base_ingest_file.__doc__,
+        annotations=ToolAnnotations(destructiveHint=True),
+    )(_wrap("knowledge_base_ingest_file")(_mcp_ingest_file))
+
+    async def _mcp_golden_suggest(namespace: str, doc_id: str) -> dict:
+        return await knowledge_base_golden_suggest(
+            namespace=namespace, doc_id=doc_id, client=get_client()
+        )
+
+    _mcp_golden_suggest.__doc__ = knowledge_base_golden_suggest.__doc__
+    mcp.tool(
+        name="knowledge_base_golden_suggest",
+        description=knowledge_base_golden_suggest.__doc__,
+        annotations=ToolAnnotations(readOnlyHint=True),
+    )(_wrap("knowledge_base_golden_suggest")(_mcp_golden_suggest))
+
+    async def _mcp_golden_add(
+        namespace: str,
+        doc_id: str,
+        query: str,
+        negatives: list[str] | None = None,
+    ) -> dict:
+        return await knowledge_base_golden_add(
+            namespace=namespace,
+            doc_id=doc_id,
+            query=query,
+            negatives=negatives,
+            client=get_client(),
+        )
+
+    _mcp_golden_add.__doc__ = knowledge_base_golden_add.__doc__
+    mcp.tool(
+        name="knowledge_base_golden_add",
+        description=knowledge_base_golden_add.__doc__,
+        annotations=ToolAnnotations(destructiveHint=True),
+    )(_wrap("knowledge_base_golden_add")(_mcp_golden_add))
+
+    async def _mcp_delete_document(
+        namespace: str,
+        doc_id: str | None = None,
+        filename: str | None = None,
+        dry_run: bool = True,
+    ) -> dict:
+        return await knowledge_base_delete_document(
+            namespace=namespace,
+            doc_id=doc_id,
+            filename=filename,
+            dry_run=dry_run,
+            client=get_client(),
+        )
+
+    _mcp_delete_document.__doc__ = knowledge_base_delete_document.__doc__
+    mcp.tool(
+        name="knowledge_base_delete_document",
+        description=knowledge_base_delete_document.__doc__,
+        annotations=ToolAnnotations(destructiveHint=True),
+    )(_wrap("knowledge_base_delete_document")(_mcp_delete_document))

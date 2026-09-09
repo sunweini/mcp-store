@@ -6,12 +6,17 @@ rag_client 的 503 退避与 400 不重试。
 """
 import pytest
 
+import rag_client as rag_client_module
 from rag_client import RagError
 from tools.knowledge_base import (
     knowledge_base_search,
     knowledge_base_namespaces,
     knowledge_base_health,
     knowledge_base_ingest,
+    knowledge_base_ingest_file,
+    knowledge_base_golden_suggest,
+    knowledge_base_golden_add,
+    knowledge_base_delete_document,
     DEFAULT_NAMESPACE,
 )
 
@@ -179,6 +184,60 @@ async def test_ingest_oversize_returns_error(fake_client):
     assert "20MB" in result["message"]
 
 
+# ── knowledge_base_ingest_file（服务器路径，大文件首选） ──────────────────────────
+
+
+async def test_ingest_file_returns_result(fake_client):
+    fake_client.ingest_path_result = {
+        "status": "ok",
+        "namespace": "kingdee-galaxy",
+        "doc_id": "kingdee-galaxy/PUR_Requisition_采购申请单.md",
+        "chunks": 16,
+    }
+
+    result = await knowledge_base_ingest_file(
+        file_path="/opt/general-rag/ingest/PUR_Requisition_采购申请单.md",
+        namespace="kingdee-galaxy",
+        client=fake_client,
+    )
+
+    assert result["status"] == "ok"
+    assert result["chunks"] == 16
+    # 参数原样透传给 client.ingest_path
+    call = fake_client.ingest_path_calls[0]
+    assert call["file_path"] == "/opt/general-rag/ingest/PUR_Requisition_采购申请单.md"
+    assert call["namespace"] == "kingdee-galaxy"
+
+
+async def test_ingest_file_empty_path_returns_error(fake_client):
+    result = await knowledge_base_ingest_file(
+        file_path="", namespace="kingdee-galaxy", client=fake_client
+    )
+    assert result["status"] == "error"
+    assert "file_path 不能为空" in result["message"]
+
+
+async def test_ingest_file_rag_error_passthrough(fake_client):
+    fake_client.ingest_path_error = RagError("文件不存在", status_code=400)
+
+    result = await knowledge_base_ingest_file(
+        file_path="/nonexistent.md", namespace="kingdee-galaxy", client=fake_client
+    )
+    assert result["status"] == "error"
+    assert "文件不存在" in result["message"]
+
+
+async def test_rag_client_ingest_path_never_retries(mock_rag):
+    """ingest-path 是写操作，503 也不重试。"""
+    mock_rag.enqueue(503, {})
+
+    with pytest.raises(RagError):
+        await mock_rag.ingest_path(
+            file_path="/opt/general-rag/ingest/x.md", namespace="stamp-project"
+        )
+    assert mock_rag._responses == []
+
+
 # ── rag_client 重试语义 ─────────────────────────────────────────────────────────
 
 
@@ -212,5 +271,244 @@ async def test_rag_client_ingest_never_retries(mock_rag):
 
     with pytest.raises(RagError):
         await mock_rag.ingest(file_bytes=b"x", filename="x.md", namespace="stamp-project")
+
+    assert mock_rag._responses == []
+
+
+# ── knowledge_base_golden_suggest（反推问法初稿，只读） ───────────────────────────
+
+
+async def test_golden_suggest_returns_candidates(fake_client):
+    fake_client.golden_suggest_result = {
+        "status": "ok",
+        "namespace": "stamp-project",
+        "doc_id": "stamp-project/a.md",
+        "candidates": [{"query": "怎么开通章管家", "negatives": ["stamp-project/b.md"]}],
+    }
+
+    result = await knowledge_base_golden_suggest(
+        namespace="stamp-project", doc_id="stamp-project/a.md", client=fake_client
+    )
+
+    assert result["status"] == "ok"
+    assert result["candidates"][0]["query"] == "怎么开通章管家"
+    assert fake_client.golden_suggest_calls[0]["namespace"] == "stamp-project"
+
+
+async def test_golden_suggest_empty_doc_id_returns_error(fake_client):
+    result = await knowledge_base_golden_suggest(
+        namespace="stamp-project", doc_id="   ", client=fake_client
+    )
+    assert result["status"] == "error"
+    assert "doc_id 不能为空" in result["message"]
+
+
+async def test_golden_suggest_404_red_line_message(fake_client):
+    """404 = 文档不在库，红线：不能反推，不得硬凑。"""
+    fake_client.golden_suggest_error = RagError("not found", status_code=404)
+
+    result = await knowledge_base_golden_suggest(
+        namespace="stamp-project", doc_id="missing.md", client=fake_client
+    )
+    assert result["status"] == "error"
+    assert "不能反推" in result["message"]
+
+
+async def test_golden_suggest_502_exhausted_honest_error(fake_client):
+    """502 耗尽仍败 → 如实报错不编造。"""
+    fake_client.golden_suggest_error = RagError("llm failed", status_code=502)
+
+    result = await knowledge_base_golden_suggest(
+        namespace="stamp-project", doc_id="a.md", client=fake_client
+    )
+    assert result["status"] == "error"
+    assert "未编造" in result["message"]
+
+
+# ── knowledge_base_golden_add（两步确认写入，写） ────────────────────────────────
+
+
+async def test_golden_add_cleans_negatives_and_passes_source(fake_client):
+    fake_client.golden_add_result = {"status": "ok", "case": {"id": "stamp-project-0001"}}
+
+    result = await knowledge_base_golden_add(
+        namespace="stamp-project",
+        doc_id="stamp-project/a.md",
+        query="怎么开通章管家",
+        negatives=["stamp-project/b.md", "", "  ", "stamp-project/c.md"],
+        client=fake_client,
+    )
+
+    assert result["status"] == "ok"
+    assert result["case"]["id"].endswith("0001")
+    call = fake_client.golden_add_calls[0]
+    # 空串/纯空白负样本被去除；source 由 client 端固定 "mcp"。
+    assert call["negatives"] == ["stamp-project/b.md", "stamp-project/c.md"]
+
+
+async def test_golden_add_non_list_negatives_coerced(fake_client):
+    fake_client.golden_add_result = {"status": "ok", "case": {"id": "x-0001"}}
+
+    await knowledge_base_golden_add(
+        namespace="stamp-project",
+        doc_id="stamp-project/a.md",
+        query="q",
+        negatives="not-a-list",  # type: ignore[arg-type]
+        client=fake_client,
+    )
+
+    assert fake_client.golden_add_calls[0]["negatives"] == []
+
+
+async def test_golden_add_empty_query_returns_error(fake_client):
+    result = await knowledge_base_golden_add(
+        namespace="stamp-project", doc_id="stamp-project/a.md", query="  ", client=fake_client
+    )
+    assert result["status"] == "error"
+    assert "query 不能为空" in result["message"]
+
+
+async def test_golden_add_ghost_reference_passthrough(fake_client):
+    """幽灵引用（期望命中/负样本 doc_id 不在库）= 后端 400，透传并提示。"""
+    fake_client.golden_add_error = RagError("ghost", status_code=400)
+
+    result = await knowledge_base_golden_add(
+        namespace="stamp-project",
+        doc_id="not-in-kb.md",
+        query="q",
+        client=fake_client,
+    )
+    assert result["status"] == "error"
+    assert "幽灵引用" in result["message"]
+
+
+# ── knowledge_base_delete_document（三步流删除，写） ─────────────────────────────
+
+
+async def test_delete_document_preserves_preview_status(fake_client):
+    """dry_run=true 后端返 status:"preview"，不得覆盖为 ok。"""
+    fake_client.delete_result = {
+        "status": "preview",
+        "namespace": "stamp-project",
+        "doc_id": "stamp-project/a.md",
+        "chunks": 5,
+        "golden_impact": {"cases": 2, "case_ids": ["stamp-project-0001", "stamp-project-0002"]},
+    }
+
+    result = await knowledge_base_delete_document(
+        namespace="stamp-project", doc_id="stamp-project/a.md", client=fake_client
+    )
+
+    assert result["status"] == "preview"
+    assert result["golden_impact"]["cases"] == 2
+
+
+async def test_delete_document_defaults_dry_run_true(fake_client):
+    fake_client.delete_result = {"status": "preview", "dry_run": True}
+
+    await knowledge_base_delete_document(
+        namespace="stamp-project", doc_id="stamp-project/a.md", client=fake_client
+    )
+
+    assert fake_client.delete_calls[0]["dry_run"] is True
+
+
+async def test_delete_document_requires_target(fake_client):
+    result = await knowledge_base_delete_document(namespace="stamp-project", client=fake_client)
+    assert result["status"] == "error"
+    assert "必须提供 doc_id 或 filename" in result["message"]
+
+
+async def test_delete_document_dry_run_false_passes_flag(fake_client):
+    fake_client.delete_result = {"status": "ok", "chunks_deleted": 5}
+
+    result = await knowledge_base_delete_document(
+        namespace="stamp-project", doc_id="stamp-project/a.md", dry_run=False, client=fake_client
+    )
+
+    assert result["status"] == "ok"
+    assert fake_client.delete_calls[0]["dry_run"] is False
+
+
+# ── rag_client golden/delete 重试语义 ────────────────────────────────────────────
+
+
+async def test_golden_suggest_retries_on_502(mock_rag, monkeypatch):
+    """502（LLM 瞬态失败）后重试成功；间隔 mock 为 0 防真睡。"""
+    monkeypatch.setattr(rag_client_module, "_GOLDEN_SUGGEST_RETRY_DELAY", 0)
+    mock_rag.enqueue(502, {})
+    mock_rag.enqueue(200, {"status": "ok", "candidates": [{"query": "q", "negatives": []}]})
+
+    result = await mock_rag.golden_suggest(namespace="stamp-project", doc_id="a.md")
+
+    assert result["candidates"][0]["query"] == "q"
+    assert mock_rag._responses == []
+
+
+async def test_golden_suggest_retries_on_empty_candidates(mock_rag, monkeypatch):
+    """200 但 candidates 为空 → 视作瞬态空内容，重试。"""
+    monkeypatch.setattr(rag_client_module, "_GOLDEN_SUGGEST_RETRY_DELAY", 0)
+    mock_rag.enqueue(200, {"status": "ok", "candidates": []})
+    mock_rag.enqueue(200, {"status": "ok", "candidates": [{"query": "q", "negatives": []}]})
+
+    result = await mock_rag.golden_suggest(namespace="stamp-project", doc_id="a.md")
+
+    assert len(result["candidates"]) == 1
+    assert mock_rag._responses == []
+
+
+async def test_golden_suggest_no_retry_on_404(mock_rag):
+    """404 = 文档不在库，红线：不重试。"""
+    mock_rag.enqueue(404, {"detail": "not found"})
+
+    with pytest.raises(RagError) as exc:
+        await mock_rag.golden_suggest(namespace="stamp-project", doc_id="missing.md")
+
+    assert exc.value.status_code == 404
+    assert mock_rag._responses == []
+
+
+async def test_golden_suggest_retries_but_exhausts(mock_rag, monkeypatch):
+    """连续 502 至多次数耗尽 → 仍 502，不编造。"""
+    monkeypatch.setattr(rag_client_module, "_GOLDEN_SUGGEST_RETRY_DELAY", 0)
+    for _ in range(3):
+        mock_rag.enqueue(502, {})
+
+    with pytest.raises(RagError) as exc:
+        await mock_rag.golden_suggest(namespace="stamp-project", doc_id="a.md")
+
+    assert exc.value.status_code == 502
+    assert mock_rag._responses == []
+
+
+async def test_golden_suggest_empty_candidates_exhausts(mock_rag, monkeypatch):
+    """最后一次 200 但仍空 candidates → 视作失败，不把空结果当成功返回。"""
+    monkeypatch.setattr(rag_client_module, "_GOLDEN_SUGGEST_RETRY_DELAY", 0)
+    for _ in range(3):
+        mock_rag.enqueue(200, {"status": "ok", "candidates": []})
+
+    with pytest.raises(RagError) as exc:
+        await mock_rag.golden_suggest(namespace="stamp-project", doc_id="a.md")
+
+    assert exc.value.status_code == 502
+    assert mock_rag._responses == []
+
+
+async def test_golden_add_never_retries(mock_rag):
+    """golden_add 是写操作，503 也不重试。"""
+    mock_rag.enqueue(503, {})
+
+    with pytest.raises(RagError):
+        await mock_rag.golden_add(namespace="stamp-project", doc_id="a.md", query="q")
+
+    assert mock_rag._responses == []
+
+
+async def test_delete_document_never_retries(mock_rag):
+    """delete_document 是写操作（真删不可逆），503 也不重试。"""
+    mock_rag.enqueue(503, {})
+
+    with pytest.raises(RagError):
+        await mock_rag.delete_document(namespace="stamp-project", doc_id="a.md")
 
     assert mock_rag._responses == []

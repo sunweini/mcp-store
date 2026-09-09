@@ -57,6 +57,22 @@ docker compose up -d general-rag-mcp
 
 ## Changelog
 
+### 0.3.0（2026-09-09）
+
+- 新增 3 工具：`knowledge_base_golden_suggest`（只读，反推问法初稿）、`knowledge_base_golden_add`（写，两步确认写入 /golden/cases）、`knowledge_base_delete_document`（写，三步流删除 + golden_impact 警示）。对应 general-rag issue #6 契约 §8 tool 4/6。
+- **golden_suggest**：自持 502/空 candidates 重试（间隔 ≥5s ×3）；404 = 文档不在库不重试（红线：不能硬凑问法）；耗尽如实报错不编造。输出仅供展示，不得直接写入。
+- **golden_add**：`source="mcp"` 恒带；空 query/doc_id 挡、negatives 非 list 强转、去空串负样本；幽灵引用（期望命中/负样本不在库）交后端 400 透传。
+- **delete_document**：`dry_run` 默认 true；纯透传不盲包 `status:"ok"`（preview 信号保留）；`golden_impact.cases>0` 提醒悬空 case 待清理，工具不自动删。
+- **测试**：18→36（suggest 502退避/空candidates重试/404不重试/耗尽 + add 校验透传 + delete preview保留/默认dry_run + rag_client 写操作不重试）。
+
+### 0.2.0（2026-09-05）
+
+- 新增工具 `knowledge_base_ingest_file`：按服务器端绝对路径摄入大文件（write tool）。
+- **背景**：file_bytes 参数要求 LLM 在 tool-call 里生成完整内容，20-44KB 文本会被模型输出截断（实测 3 份 22-44KB 字段清单只入库 286-683 字符）。新工具只传一个短路径字符串（`file_path`），内容由后端从服务器磁盘读取，永不截断。
+- 后端配套：`POST /api/v1/ingest-path`（同管线读服务器路径，双路径探测 `/opt/general-rag/ingest` ↔ `/app/ingest`）。
+- **用法**：调用方先 rsync/scp 文件到 MCP 同机的 `/opt/general-rag/ingest/`，再调 `knowledge_base_ingest_file(file_path, namespace)`。大文件不再使用 `knowledge_base_ingest`（file_bytes）。
+- 测试 13→18（ingest_file 参数透传/空路径/错误透传/不重试 + rag_client.ingest_path）。
+
 ### 0.1.0（2026-09-01）
 
 - 初始版本：search / namespaces / health / ingest 四工具

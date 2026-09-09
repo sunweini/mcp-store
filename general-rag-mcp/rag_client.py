@@ -22,6 +22,11 @@ tracer = trace.get_tracer("general_rag_mcp.rag_client")
 # NOTE: 只读/可重试的接口才有退避重试；ingest 写操作不重试。
 _READ_RETRY_DELAYS = (1.0, 2.0, 4.0)
 
+# golden suggest 的瞬态失败重试：LLM 批量调用偶发空内容/502，契约要求
+# 间隔 >=5s 重试 <=3 次。间隔/次数做成模块常量，测试 monkeypatch 防真睡。
+_GOLDEN_SUGGEST_MAX_ATTEMPTS = 3
+_GOLDEN_SUGGEST_RETRY_DELAY = 5.0
+
 # 隐私约束（指南 §3）：snippet 截断长度，避免完整转储文档内容进日志/返回体。
 SNIPPET_LIMIT = 500
 
@@ -128,6 +133,106 @@ class RagClient:
         return await self._request(
             "POST", "/ingest", data=data, files=files, retryable=False
         )
+
+    async def ingest_path(
+        self,
+        file_path: str,
+        namespace: str,
+        doc_type: str | None = None,
+        title: str | None = None,
+        tags: str | None = None,
+        categories: str | None = None,
+    ) -> dict:
+        """POST /ingest-path — 按服务器端绝对路径摄入（不传文件内容）。
+
+        写入操作，不重试。只传一个短路径字符串，大文件内容不会被 LLM
+        参数截断——这是 20KB+ 文件的推荐摄入路径。
+        """
+        payload: dict[str, Any] = {
+            "file_path": file_path,
+            "namespace": namespace,
+        }
+        if doc_type:
+            payload["doc_type"] = doc_type
+        if title:
+            payload["title"] = title
+        if tags:
+            payload["tags"] = tags
+        if categories:
+            payload["categories"] = categories
+        return await self._request(
+            "POST", "/ingest-path", json=payload, retryable=False
+        )
+
+    # ── golden 集（生长/删除） ─────────────────────────────────────
+
+    async def golden_suggest(self, namespace: str, doc_id: str) -> dict:
+        """POST /golden/suggest — 反推口语问法初稿（只读，无副作用）。
+
+        区别于 _request 的 retryable（只处理 503/连接错、不判 body），此方法
+        自持重试循环：瞬态 502（LLM 批量空内容）或 200 但 candidates 为空 →
+        间隔 >=5s 重试 <=3 次。404 = 文档不在库，红线，不重试。耗尽如实抛错。
+        """
+        payload = {"namespace": namespace, "doc_id": doc_id}
+        for attempt in range(1, _GOLDEN_SUGGEST_MAX_ATTEMPTS + 1):
+            try:
+                # retryable=True：503(ES 骨干故障)/连接错走 _request 退避重试。
+                body = await self._request(
+                    "POST", "/golden/suggest", json=payload, retryable=True
+                )
+            except RagError as e:
+                if e.status_code == 502 and attempt < _GOLDEN_SUGGEST_MAX_ATTEMPTS:
+                    await asyncio.sleep(_GOLDEN_SUGGEST_RETRY_DELAY)
+                    continue
+                raise
+
+            if body.get("candidates"):
+                return body
+
+            # 200 但 candidates 为空：瞬态空内容，重试；最后一次仍空则如实失败，
+            # 不能把空结果当成功返回（红线：不编造）。
+            if attempt < _GOLDEN_SUGGEST_MAX_ATTEMPTS:
+                await asyncio.sleep(_GOLDEN_SUGGEST_RETRY_DELAY)
+                continue
+            raise RagError("golden suggest 重试耗尽（空 candidates）", 502)
+
+    async def golden_add(
+        self,
+        namespace: str,
+        doc_id: str,
+        query: str,
+        negatives: list[str] | None = None,
+        source: str = "mcp",
+    ) -> dict:
+        """POST /golden/cases — 写入一条 golden case。写操作，不重试。"""
+        payload: dict[str, Any] = {
+            "namespace": namespace,
+            "doc_id": doc_id,
+            "query": query,
+            "source": source,
+        }
+        if negatives:
+            payload["negatives"] = negatives
+        return await self._request("POST", "/golden/cases", json=payload, retryable=False)
+
+    async def delete_document(
+        self,
+        namespace: str,
+        doc_id: str | None = None,
+        filename: str | None = None,
+        dry_run: bool = True,
+    ) -> dict:
+        """POST /delete — 删除文档（真删不可逆）。写操作，不重试。
+
+        doc_id 与 filename 二选一（doc_id 优先），后端校验。dry_run=true 返回
+        preview（含 golden_impact），false 才真删。
+        """
+        payload: dict[str, Any] = {"namespace": namespace, "dry_run": dry_run}
+        if doc_id:
+            payload["doc_id"] = doc_id
+        if filename:
+            payload["filename"] = filename
+        return await self._request("POST", "/delete", json=payload, retryable=False)
 
     # ── 底层请求 ───────────────────────────────────────────────────
 
