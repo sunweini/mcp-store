@@ -57,6 +57,12 @@ docker compose up -d general-rag-mcp
 
 ## Changelog
 
+### 0.4.1（2026-09-09）
+
+- `knowledge_base_search` 渲染图按**完整 URL 去重**：`source.images` 是文档级——整篇文档的图挂到每个 chunk，多 chunk 命中时同 URL 在 `sources[]` 重复（实测 2-chunk 文档同图渲染 2 次）。改为本次响应级 `rendered_urls` 集合，同 URL 只渲染一次（且只 fetch 一次后端 `/media`）。
+- 去重只影响展示：`sources[].images` 字段仍保留全量 URL 列表；不同文档不同 URL 不误伤（按完整 URL 匹配）。无图/空数组照常，不报错。
+- 测试：46→48（同 URL 跨 source 渲染一次 / `sources[].images` 完整性）。
+
 ### 0.4.0（2026-09-09）
 
 - `knowledge_base_search` 返回**可渲染图片**：`source.images`（§4.3 图片 URL）拉字节转成 MCP `image` content 块随回答返回，客户端原生渲染；不再只是裸 URL 字符串。

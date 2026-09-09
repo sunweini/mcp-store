@@ -154,16 +154,23 @@ async def knowledge_base_search(
 
     # 内嵌可渲染图（客户端 image content 块）：按命中顺序，最多 MAX_MEDIA_COUNT 张，
     # 单张 ≤MAX_MEDIA_BYTES；拉取失败/超限降级回 URL（URL 已留在 sources[].images）。
+    # 去重：source.images 是文档级——整篇文档的图会挂到每个 chunk，多 chunk 命中时
+    # 同 URL 在 sources[] 重复。按完整 URL 去重，只对本次响应渲染一次；不同文档的
+    # 不同 URL 不误伤；sources[].images 字段保留全量不截断。
+    rendered_urls: set[str] = set()
     image_blocks = []
     for s in sources:
         if len(image_blocks) >= MAX_MEDIA_COUNT:
             break
         for img_url in s.get("images") or []:
+            if img_url in rendered_urls:
+                continue
             if len(image_blocks) >= MAX_MEDIA_COUNT:
                 break
             block = await _fetch_image_content(client, img_url)
             if block is not None:
                 image_blocks.append(block)
+                rendered_urls.add(img_url)
 
     text = result.get("answer") or "（无答案）"
     return ToolResult(

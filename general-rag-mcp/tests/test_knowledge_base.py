@@ -243,6 +243,46 @@ async def test_search_media_respects_count_cap(fake_client):
     assert len(image_blocks) == MAX_MEDIA_COUNT
 
 
+async def test_search_dedupes_image_url_across_sources(fake_client):
+    """同 URL 在多 source 重复（文档级图挂到每 chunk）→ 渲染一次且只 fetch 一次。"""
+    url = "/api/v1/media/imgtest-real/imgtest-real_assets/img0.jpg"
+    fake_client.search_result = {
+        "sources": [
+            {"title": "c1", "doc_id": "imgtest-real/imgtest-real.md", "images": [url]},
+            {"title": "c2", "doc_id": "imgtest-real/imgtest-real.md", "images": [url]},
+        ],
+        "degraded": False,
+    }
+    fake_client.media_result = b"\xff\xd8\xff\xe0" + b"\x00" * 8
+
+    result = await knowledge_base_search(query="q", namespace="imgtest-real", client=fake_client)
+
+    image_blocks = [b for b in result.content if b.type == "image"]
+    assert len(image_blocks) == 1
+    assert image_blocks[0].mime_type == "image/jpeg"
+    # 去重，不重复拉后端。
+    assert fake_client.get_media_calls == [url]
+
+
+async def test_search_images_field_preserved_with_dedup(fake_client):
+    """去重不影响 sources[].images 字段——仍保留全量 URL 列表。"""
+    url = "/api/v1/media/imgtest-real/imgtest-real_assets/img0.jpg"
+    fake_client.search_result = {
+        "sources": [
+            {"title": "c1", "doc_id": "imgtest-real/imgtest-real.md", "images": [url]},
+            {"title": "c2", "doc_id": "imgtest-real/imgtest-real.md", "images": [url]},
+        ],
+        "degraded": False,
+    }
+    fake_client.media_result = b"\xff\xd8\xff\xe0"
+
+    result = await knowledge_base_search(query="q", namespace="imgtest-real", client=fake_client)
+
+    sc = result.structured_content
+    assert sc["sources"][0]["images"] == [url]
+    assert sc["sources"][1]["images"] == [url]
+
+
 async def test_search_images_absent_produce_no_image_block(fake_client):
     """无 images → content 只有文本块。"""
     fake_client.search_result = {"sources": [{"title": "t", "doc_id": "x.md"}], "degraded": False}

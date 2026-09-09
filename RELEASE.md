@@ -2,6 +2,38 @@
 
 本仓库版本更新记录。每个里程碑记录：变更内容、影响范围、升级/部署注意事项、回滚方式。
 
+## v1.4.2 — general-rag-mcp search 渲染图按 URL 去重（2026-09-09）
+
+**目标**：`knowledge_base_search` 渲染图片时按完整 URL 去重——`source.images` 是文档级（整篇文档的图挂到每个 chunk），多 chunk 命中时同 URL 在 `sources[]` 重复，导致同图重复渲染。
+
+### 变更内容
+
+- 渲染循环加响应级 `rendered_urls` 集合：同 URL 只渲染一次、只 fetch 一次后端 `/media`。
+- 去重仅影响展示：`sources[].images` 仍保留全量 URL 列表；不同文档不同 URL 不误伤（按完整 URL 匹配）；无图/空数组照常。
+- 测试 46→48。
+
+### 影响范围
+
+- 仅 general-rag-mcp 的 `knowledge_base_search` 渲染逻辑；工具签名、结构化字段、gateway 转发不变。后端不动。
+
+### 部署注意事项
+
+1. 重建 general-rag-mcp 容器：`docker compose build general-rag-mcp && docker compose up -d general-rag-mcp`。
+
+### 回滚
+
+```bash
+docker compose rm -sf general-rag-mcp
+# 或 git 回退 general-rag-mcp/ 目录后重建
+```
+
+### 验证证据
+
+- general-rag-mcp 48 用例全绿。
+- live 冒烟（imgtest-real，2-chunk 文档同 URL）：MCP `tools/call` 返 **1 个 image 块**（此前 2），`sources[].images` 两 source 均保留完整 URL。
+
+---
+
 ## v1.4.1 — general-rag-mcp search 返回可渲染图片（2026-09-09）
 
 **目标**：`knowledge_base_search` 把 `source.images`（§4.3 图片 URL）拉字节转成 MCP `image` content 块随回答返回，客户端原生渲染；不再只给裸 URL 字符串。
