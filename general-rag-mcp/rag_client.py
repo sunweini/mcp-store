@@ -177,8 +177,14 @@ class RagClient:
         for attempt in range(1, _GOLDEN_SUGGEST_MAX_ATTEMPTS + 1):
             try:
                 # retryable=True：503(ES 骨干故障)/连接错走 _request 退避重试。
+                # transient_statuses={502}：502 由本方法外层自持重试，_request 记
+                # WARNING 而非 ERROR，避免瞬态被当噪点。
                 body = await self._request(
-                    "POST", "/golden/suggest", json=payload, retryable=True
+                    "POST",
+                    "/golden/suggest",
+                    json=payload,
+                    retryable=True,
+                    transient_statuses={502},
                 )
             except RagError as e:
                 if e.status_code == 502 and attempt < _GOLDEN_SUGGEST_MAX_ATTEMPTS:
@@ -245,10 +251,15 @@ class RagClient:
         data: dict | None = None,
         files: dict | None = None,
         retryable: bool,
+        transient_statuses: set[int] | None = None,
     ) -> dict:
         """发起请求；retryable=True 时对 503/连接错误做指数退避重试。
 
         指南 §7.5：503 是骨干故障，1s/2s/4s 最多 3 次；400 不重试。
+
+        transient_statuses：调用方已在外层自持重试的状态码（如 golden_suggest 的
+        502）。命中时记 WARNING、不置 span 错误，但仍抛 RagError 供调用方重试——
+        区别于 503 的 `_request` 内部退避。避免"自愈的瞬态"被记成 ERROR 噪点。
         """
         url = f"{self._base_url}{path}"
         attempt = 0
@@ -286,6 +297,20 @@ class RagClient:
                             )
                             await asyncio.sleep(delay)
                             continue
+
+                    # transient_statuses（如 golden_suggest 的 502）：调用方外层自持重试，
+                    # 这里记 WARNING、不置 span 错误，仍抛 RagError 供其循环。避免把
+                    # "自愈的瞬态"记成 ERROR 噪点（对比 503 的 WARNING 处理）。
+                    if transient_statuses and resp.status_code in transient_statuses:
+                        logger.warning(
+                            "rag_api_transient_retry",
+                            service="general-rag-mcp",
+                            path=path,
+                            status_code=resp.status_code,
+                        )
+                        raise RagError(
+                            f"general-rag 返回 HTTP {resp.status_code}", resp.status_code
+                        )
 
                     # 其余错误：不重试，直接抛业务错误。
                     # NOTE: 日志不 dump 响应体（隐私，可能含文档内容）。

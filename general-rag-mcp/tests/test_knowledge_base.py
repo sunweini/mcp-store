@@ -5,6 +5,7 @@ namespace 缺省、namespaces/health 正常路径、ingest 参数校验、以及
 rag_client 的 503 退避与 400 不重试。
 """
 import pytest
+from structlog.testing import capture_logs
 
 import rag_client as rag_client_module
 from rag_client import RagError
@@ -479,6 +480,30 @@ async def test_golden_suggest_retries_but_exhausts(mock_rag, monkeypatch):
 
     assert exc.value.status_code == 502
     assert mock_rag._responses == []
+
+
+async def test_golden_suggest_502_logs_warning_not_error(mock_rag, monkeypatch):
+    """瞬态 502 记 WARNING 而非 ERROR——重试语义下不把自愈瞬态当硬错误噪点。"""
+    monkeypatch.setattr(rag_client_module, "_GOLDEN_SUGGEST_RETRY_DELAY", 0)
+    with capture_logs() as caplogs:
+        mock_rag.enqueue(502, {})
+        mock_rag.enqueue(200, {"status": "ok", "candidates": [{"query": "q", "negatives": []}]})
+        await mock_rag.golden_suggest(namespace="stamp-project", doc_id="a.md")
+
+    events = {log.get("event") for log in caplogs}
+    assert "rag_api_transient_retry" in events
+    assert "rag_api_error" not in events
+
+
+async def test_search_502_still_logs_error(mock_rag):
+    """其他读接口（未声明 transient_statuses）502 仍记 ERROR，未被软化。"""
+    with capture_logs() as caplogs:
+        mock_rag.enqueue(502, {})
+        with pytest.raises(RagError):
+            await mock_rag.search(query="q", namespace="stamp-project")
+
+    events = {log.get("event") for log in caplogs}
+    assert "rag_api_error" in events
 
 
 async def test_golden_suggest_empty_candidates_exhausts(mock_rag, monkeypatch):
