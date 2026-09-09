@@ -2,6 +2,46 @@
 
 本仓库版本更新记录。每个里程碑记录：变更内容、影响范围、升级/部署注意事项、回滚方式。
 
+## v1.4.0 — general-rag-mcp golden 生长+删除 三工具（2026-09-09）
+
+**目标**：补 general-rag-mcp 的 golden 集生长（两步确认）与文档删除（三步流 + golden_impact）三工具，对应 general-rag issue #6 契约 §8 tool 4/6。
+
+### 变更内容
+
+| 变更 | 说明 |
+|---|---|
+| general-rag-mcp 新增 3 工具 | `knowledge_base_golden_suggest`（读，反推问法初稿）/ `knowledge_base_golden_add`（写，两步确认写入 /golden/cases，source="mcp"）/ `knowledge_base_delete_document`（写，三步流删除，dry_run 默认 true，golden_impact 警示）。工具数 4→8 |
+| suggest 语义 | 自持 502/空 candidates 重试（≥5s×3）；404 红线不重试（文档不在库不能硬凑）；耗尽如实报错不编造；初稿仅供展示 |
+| add 语义 | 空 query/doc_id 挡、negatives 非 list 强转/去空串；幽灵引用（期望命中/负样本不在库）交后端 400 |
+| delete 语义 | 纯透传保留 `status:"preview"`；dry_run 默认 true；`golden_impact.cases>0` 提醒悬空 case 人工清理，工具不自动删 |
+| 可观测性 | `RagClient._request` 新增 `transient_statuses`；瞬态 502 记 WARNING 不误报 ERROR（golden_suggest 传 {502}） |
+| 测试 | general-rag-mcp 39 用例全绿；live 冒烟 dev ns 全流程零残留 |
+
+### 影响范围
+
+- 纯 general-rag-mcp 功能新增；gateway-proxy/admin/其他 MCP 不动。后端 general-rag 已上线（/golden/*、/delete）。
+- 现有 5 工具行为不变（search/namespaces/health/ingest/ingest_file）。
+
+### 部署注意事项（必读）
+
+1. 重建 general-rag-mcp 容器：`docker compose build general-rag-mcp && docker compose up -d general-rag-mcp`。
+2. 注册 gateway 后若 tools:0，用「refresh-tools」修复（已知竞态）。
+3. 写操作（golden_add/delete_document）token 需显式授 write 权限；读取 golden_suggest 授 read。
+
+### 回滚
+
+```bash
+docker compose rm -sf general-rag-mcp
+# 或 git 回退 general-rag-mcp/ 目录后重建
+```
+
+### 验证证据
+
+- general-rag-mcp 39 用例全绿；MCP tools/list 8 工具注解正确（suggest read / add、delete destructive）。
+- live 冒烟（dev ns）：suggest 返 2 candidates；add 写入 case dev-0002(source=mcp)；幽灵引用 400 拒收；delete preview `status:"preview"` + golden_impact.cases=1；真删 chunks_deleted=1；清理后 dev `golden/health` total_cases=0。
+
+---
+
 ## v1.3.0 — 权限编辑功能 + 读写越权修复（2026-09-01）
 
 **目标**：补上 token 的 MCP server 权限编辑能力（创建后能改），并修复一个导致只读 token 越权访问 write 工具的 gateway-proxy 缺陷。

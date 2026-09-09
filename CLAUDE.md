@@ -118,7 +118,7 @@ MCP Client -> gateway-proxy:8082 -> [zabbix-mcp:9053, tavily-mcp:9050, ...]
 | 9052 | serpapi-mcp | 搜索源（5 engines） |
 | 9053 | zabbix-mcp | 告警巡检（8 tools） |
 | 9054 | aliyun-dns-mcp | 阿里云 DNS 解析管理（6 tools） |
-| 9055 | general-rag-mcp | general-rag 知识库检索（4 tools，含 ingest 写操作） |
+| 9055 | general-rag-mcp | general-rag 知识库检索（8 tools：search/namespaces/health/golden_suggest 读 + ingest/ingest_file/golden_add/delete_document 写） |
 | 6379 | redis | 配置/状态/audit:calls 审计缓冲流（容器内，不映射宿主） |
 | 3306 | mysql | 调用审计 calls 表（容器内，不映射宿主） |
 
@@ -135,7 +135,7 @@ MCP Client -> gateway-proxy:8082 -> [zabbix-mcp:9053, tavily-mcp:9050, ...]
 | `brave-mcp/` | Brave MCP | Brave 搜索（web/local 2 tools） | ✅ 开发完成 |
 | `serpapi-mcp/` | SerpAPI MCP | SerpAPI 搜索（google/bing/baidu/duckduckgo/ebay 5 engines） | ✅ 开发完成 |
 | `aliyun-dns-mcp/` | Aliyun DNS MCP | 阿里云 DNS 多账户解析管理（6 tools，账户级读写权限） | ✅ 开发完成 |
-| `general-rag-mcp/` | General RAG MCP | general-rag 知识库检索问答（search/namespaces/health 读 + ingest 写） | ✅ 开发完成 |
+| `general-rag-mcp/` | General RAG MCP | general-rag 知识库检索问答（search/namespaces/health/golden_suggest 读 + ingest/ingest_file/golden_add/delete_document 写；golden 集生长两步确认 + 删除三步流） | ✅ 开发完成 |
 
 ## 知识库（开发必读）
 

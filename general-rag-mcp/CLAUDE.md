@@ -19,7 +19,7 @@ MCP Client → FastMCP (streamable-http, stateless) → tools/knowledge_base.py
 ```
 
 - FastMCP v4 + MCP Protocol 2026-07-28（stateless HTTP）
-- `tools/knowledge_base.py`：4 个模块级工具函数（可测试），`register()` 注册 MCP 包装
+- `tools/knowledge_base.py`：8 个模块级工具函数（可测试），`register()` 注册 MCP 包装
 - `rag_client.py`：REST client + 超时/重试/snippet 截断
 - `telemetry.py`：OTel traces + Prometheus metrics
 
@@ -30,7 +30,11 @@ MCP Client → FastMCP (streamable-http, stateless) → tools/knowledge_base.py
 | `knowledge_base_search` | 读 | 60s | 503 退避 1s/2s/4s ×3 | 核心检索 |
 | `knowledge_base_namespaces` | 读 | 60s | 503 退避 | 列出 namespace |
 | `knowledge_base_health` | 读 | 60s | 503 退避 | 组件状态 |
+| `knowledge_base_golden_suggest` | 读 | 60s | 502/空 candidates ≥5s×3（自持） | 反推问法初稿；404 红线不重试 |
 | `knowledge_base_ingest` | **写** | 60s | 不重试 | 文件摄入（非幂等） |
+| `knowledge_base_ingest_file` | **写** | 60s | 不重试 | 按服务器路径摄入大文件 |
+| `knowledge_base_golden_add` | **写** | 60s | 不重试 | 两步确认写入 golden case |
+| `knowledge_base_delete_document` | **写** | 60s | 不重试 | 三步流删除 + golden_impact 警示 |
 
 错误语义（指南 §4.4 / §7）：
 
