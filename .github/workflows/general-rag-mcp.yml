@@ -1,0 +1,50 @@
+name: general-rag-mcp
+
+# 为什么有这个文件：general-rag-mcp 有 52 条测试，其中几条是本仓库特有的**守卫**——
+# 来源字段整体透传（防白名单漂移）、register() 适配函数与真实函数的参数一致
+# （防"函数支持但工具 schema 里没有"）。这些守卫只在有人记得跑 pytest 时才生效。
+# CI 让它们每次 push 自动跑。
+#
+# 路径限定：mcpstore 是**多 MCP 单仓库**（仓库约定："每个 MCP server 独立目录，
+# 独立依赖，独立发布"）。本 workflow 只管 general-rag-mcp，不替其他子项目
+# （aliyun-dns-mcp / brave-mcp / gateway-*）猜它们的测试怎么跑。
+#
+# 用 uv（与 pyproject.toml + uv.lock 一致），不是 pip：本项目的依赖管理就是 uv，
+# `uv sync --all-extras` 会按 lock 装出与本地一致的环境。
+#
+# 测试全部用 FakeClient / httpx MockTransport，**不调真实后端**：已实测在
+# GENERAL_RAG_BASE_URL 指向死地址时 52 条仍全绿，所以 runner 上不需要开服务。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'general-rag-mcp/**'
+      - '.github/workflows/general-rag-mcp.yml'
+  pull_request:
+    paths:
+      - 'general-rag-mcp/**'
+      - '.github/workflows/general-rag-mcp.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: general-rag-mcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # 显式钉住解释器版本：requires-python 是 >=3.12，不钉的话会随 uv 默认漂移。
+      - name: 安装 Python 3.12
+        run: uv python install 3.12
+
+      - name: 安装依赖
+        run: uv sync --all-extras
+
+      - name: 跑测试
+        run: uv run python -m pytest tests/ -q
