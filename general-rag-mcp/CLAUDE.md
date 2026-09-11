@@ -88,6 +88,25 @@ uv run python server.py
 uv run python -m pytest tests/ -q
 ```
 
+## CI
+
+`.github/workflows/general-rag-mcp.yml`（**在 mcpstore 仓库根**，路径限定
+`general-rag-mcp/**`）：push 到 main、以及改动本目录的 PR 会自动跑
+`uv run python -m pytest tests/ -q`。
+
+- **路径限定是刻意的**：mcpstore 是「每个 MCP 独立目录、独立依赖、独立发布」的多
+  MCP 单仓库，本 workflow 不替其他子项目（aliyun-dns-mcp / brave-mcp / gateway-*）
+  猜它们的测试怎么跑。给别的子项目加 CI 时另建 workflow。
+- **runner 上不需要服务容器**：测试全部用 `FakeClient` / httpx `MockTransport`，
+  实测 `GENERAL_RAG_BASE_URL` 指向死地址时 52 条仍全绿。
+- **`astral-sh/setup-uv` 必须写精确版本**（`@v10.1.0`），它**不维护浮动大版本
+  tag**——写 `@v10` 会 404 让 CI 直接挂。升级 action 前先
+  `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` 查证。
+- ⚠️ **往本仓库推 workflow 文件需要 `workflow` scope 的凭据**：HTTPS + PAT 会被拒
+  （实测报 `refusing to allow a Personal Access Token to create or update workflow`），
+  走 SSH 可以（`git push git@github.com:sunweini/mcp-store.git main`）。普通文件用原
+  remote 即可，只有 `.github/workflows/**` 受此限制。
+
 ## 已知注意事项（续）
 
 本仓库已建 CodeGraph 索引（`.codegraph/`，守护进程自动同步）：跨文件调用链/影响面分析用 `codegraph query|node|explore`（CLI 需 node 在 PATH：`export PATH="/opt/homebrew/Cellar/node@22/22.22.2/bin:/opt/homebrew/bin:$PATH"`）。
