@@ -472,7 +472,15 @@ def register(mcp: FastMCP, get_client, metrics=None) -> None:
         tags: list[str] | None = None,
         categories: list[str] | None = None,
         use_graph: bool = True,
+        include_deprecated: bool = True,
     ) -> dict:
+        # ⚠️ 这个签名是**工具 inputSchema 的唯一来源**（FastMCP 从它生成），与
+        # knowledge_base_search 的签名是**两份独立声明**——2026-09-11 加
+        # include_deprecated 时只改了后者，结果参数存在、工具却暴露不出来
+        # （真实 MCP 协议调用实测：schema 里没有它）。这是本仓库"两份手写清单
+        # 漂移"的**第四处**（前三处：ES 路白名单、向量路白名单、MCP source 白名单）。
+        # 加/改参数时**两处都要动**；
+        # tests::test_mcp_search_params_match_tool_function 把两者钉在一起。
         return await knowledge_base_search(
             query=query,
             namespace=namespace,
@@ -481,6 +489,7 @@ def register(mcp: FastMCP, get_client, metrics=None) -> None:
             tags=tags,
             categories=categories,
             use_graph=use_graph,
+            include_deprecated=include_deprecated,
             client=get_client(),
         )
 

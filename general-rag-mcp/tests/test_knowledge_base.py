@@ -803,3 +803,70 @@ async def test_search_truncates_snippet_but_keeps_rest(fake_client):
 
     assert len(src["snippet"]) <= SNIPPET_LIMIT + 1, "snippet 必须截断（隐私）"
     assert src["status"] == "stable", "截断 snippet 不该顺手丢别的字段"
+
+
+# ── register() 适配函数的参数漂移（2026-09-11）──────────────────────────────
+#
+# `register()` 里的 `_mcp_search` 与模块级 `knowledge_base_search` 是**两份独立的
+# 参数声明**。FastMCP 从 `_mcp_search` 的签名生成工具 inputSchema，所以只改后者
+# 的话：函数支持新参数、工具却暴露不出来。2026-09-11 加 include_deprecated 时
+# 正是这样——真实 MCP 协议调用实测 schema 里没有它，而那之前所有单测都是绿的
+# （它们直接 import 函数，绕过了 register 生成 schema 这一步）。
+#
+# 这是本仓库"两份手写清单漂移"的第四处。下面这条测试用**结构化对比**把两者钉在
+# 一起：不维护字段清单，而是直接比参数名集合——将来加任何参数，只改一处就会红。
+
+
+def _register_captured_signatures():
+    """跑一遍 register()，抓出每个工具适配函数的参数名集合。
+
+    用一个假的 FastMCP 接收 mcp.tool(...)(fn)，从 fn 的签名里读参数。
+    """
+    import inspect
+    from tools import knowledge_base as kb
+
+    captured = {}
+
+    class _FakeTool:
+        def __init__(self, fn):
+            self.fn = fn
+
+    class _FakeMCP:
+        def tool(self, name=None, description=None, annotations=None):
+            def deco(fn):
+                captured[name] = set(inspect.signature(fn).parameters)
+                return fn
+            return deco
+
+    kb.register(_FakeMCP(), get_client=lambda: None)
+    return captured
+
+
+def test_mcp_search_params_match_tool_function():
+    """工具适配函数的参数集必须与真实函数一致（差一个就红）。
+
+    两个方向都查：适配函数里有的、真实函数里没有（写了不生效），
+    以及真实函数里有的、适配函数里没有（**工具暴露不出来** ← 这次的事故形态）。
+    """
+    import inspect
+    from tools.knowledge_base import knowledge_base_search
+
+    captured = _register_captured_signatures()
+    assert "knowledge_base_search" in captured, "register() 没注册 search 工具"
+
+    adapter = captured["knowledge_base_search"]
+    real = set(inspect.signature(knowledge_base_search).parameters)
+
+    # client 是只有真实函数才有的注入点，适配函数通过闭包拿，不算漂移
+    adapter_cmp = adapter
+    real_cmp = real - {"client"}
+
+    assert adapter_cmp == real_cmp, (
+        "register() 的 _mcp_search 与 knowledge_base_search 参数不一致——"
+        "FastMCP 从适配函数生成 inputSchema，只改一处会让参数在工具上不存在。\n"
+        f"  只在适配函数里（写了不生效）: {sorted(adapter_cmp - real_cmp)}\n"
+        f"  只在真实函数里（工具暴露不出来）: {sorted(real_cmp - adapter_cmp)}"
+    )
+    # 点名钉住这次的具体事故
+    assert "include_deprecated" in adapter, (
+        "include_deprecated 必须在工具 schema 里，否则 agent 无法选择排除已下架内容")
