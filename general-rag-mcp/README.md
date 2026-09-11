@@ -76,6 +76,22 @@ uv run python -m pytest tests/ -q
 - **gap_warning**：非空表示知识库可能覆盖不足，不要臆测补充。
 - **来源置信度**：`confidence_basis=rerank` 时星级有绝对意义；
   `source_path=graph_expand` 的可信度略低，优先以 direct 为主。
+- **来源字段整体透传（2026-09-11 起）**：sources[] 里 API 返回的字段**全部原样
+  透传**（只截断 snippet）。此前是逐个挑选字段的白名单，导致后端新增的
+  `metadata`/`generated_by`/`updated_at`/`status`/`chunk_path` **全都到不了 agent**
+  ——白名单是"默认丢弃、显式放行"，方向本身就错。现在后端加字段自动到达，
+  **不需要改这里**。
+- **可信度线索，agent 应当用起来**（别只看 snippet）：
+  - `confidence` / `confidence_basis`：这次**检索命中得准不准**，**不表示内容可信**。
+  - `generated_by`：谁产出的。`process:ingest` = 机器转换入库（未经人工核实）；
+    `human:<id>` = 人写的/人确认过；`""` = **来历不明**（不要当人工撰写）。
+  - `status`：`deprecated` = **已下架**、可能有更新版本 → **引用时必须提示用户**；
+    `draft` = 未定稿。默认**照常返回、不降权**（下架≈隐身就等于没提供这个选项）。
+  - `updated_at`：最后修改时间，判断"还新不新"。
+  - `chunk_path`：标题面包屑，引用时比 `title` 精确。
+  - `extra`：该 namespace 声明的自定义字段值（如 product/module）。
+- **`include_deprecated` 参数**：默认 `True`（含已下架内容）。只有用户明确要求
+  "只看现行内容"时才传 `False`。
 
 ## 安全
 

@@ -1,6 +1,6 @@
 """general-rag 知识库检索工具。
 
-三个读工具（search / namespaces / health）+ 一个写工具（ingest）。
+四个读工具（search / namespaces / health / golden_suggest）+ 四个写工具（ingest / ingest_file / golden_add / delete_document）。
 
 设计说明：函数定义在模块级（非 register() 内闭包），测试可直接 import
 并注入 mock client；register() 只做薄包装注入真实 client。
@@ -88,6 +88,7 @@ async def knowledge_base_search(
     tags: list[str] | None = None,
     categories: list[str] | None = None,
     use_graph: bool = True,
+    include_deprecated: bool = True,
     *,
     client: RagClient | None = None,
 ) -> ToolResult:
@@ -96,6 +97,20 @@ async def knowledge_base_search(
     必须指定 namespace（缺省 stamp-project）。返回 answer + sources[] +
     degraded + gap_warning。当 degraded=true 或 gap_warning 非空时如实
     告知用户，不要臆测补充。
+
+    sources[] 每个来源带这些**可信度线索**（agent 应当用起来，别只看 content）：
+      - confidence / confidence_basis：这次**检索命中得准不准**（rerank 模型分
+        或位置序）。注意它**不表示内容可信**。
+      - generated_by：谁产出的。`process:ingest` = 由文件转换/摄入入库（未经人工
+        核实），`human:<id>` = 人写的或人确认过，`""` = **来历不明**（不要当人工撰写）。
+      - status：生命周期。`deprecated` = **已下架**、可能有更新版本，引用时必须
+        提示用户；`draft` = 未定稿。
+      - updated_at：文档最后修改时间，判断"还新不新"。
+      - chunk_path：标题面包屑（如"手册 > 4.1 坑清单"），引用时比 title 精确。
+
+    include_deprecated 默认 True：**已下架文档照常返回、不降权**，只在 status 里
+    标记（下架≈隐身就等于没提供"下架"这个选项）。只有用户明确要求"只看现行内容"
+    时才传 False。
 
     sources[].images 里命中的图会拉字节转成 MCP image content 块随回答返回
     （客户端原生渲染）；单张 >2MB 或拉取失败降级回 URL 文本，最多返回 3 张。
@@ -114,6 +129,7 @@ async def knowledge_base_search(
             tags=tags,
             categories=categories,
             use_graph=use_graph,
+            include_deprecated=include_deprecated,
         )
     except RagError as e:
         # 400 多为 namespace 缺失/为 default：提示补全/纠正 namespace。
@@ -124,22 +140,30 @@ async def knowledge_base_search(
     except RagConnectionError as e:
         return _search_error(f"知识库服务暂不可用：{e}，请稍后重试")
 
-    # 截断 snippet（隐私），保留结构化来源字段供 agent 引用。
+    # 透传 API 返回的**全部**来源字段，只对 snippet 做截断（隐私）。
+    #
+    # 为什么不再用手写白名单（2026-09-11 修）：这里原先逐个挑选字段，于是后端每次
+    # 给 source 加字段都得记得同步改这里，**忘了就静默丢**——agent 看到的响应里那个
+    # 字段凭空消失，且没有任何报错。实际已漏三轮：metadata（tags/categories，第16轮）、
+    # generated_by / updated_at（第17轮）、status / chunk_path（第18轮）——后端全都
+    # 在返回，agent 一个都看不到，等于那三轮为 agent 侧做的工作全部落空。
+    # 同一形态的坑在 general-rag 仓库里也出现过两次（ES 路与向量路两份白名单漂移，
+    # 见其 CLAUDE.md Gotcha 36）。
+    #
+    # 白名单是"默认丢弃、显式放行"，方向本身就错：新字段的正确默认是**流动**，不是
+    # 被拦住。改成透传后这个 bug 类在结构上不可能再发生——后端加字段自动到达 agent，
+    # 不需要任何一侧记得同步。回归测试 test_search_passes_through_all_source_fields
+    # 用"给什么出什么"钉住这一点。
+    #
+    # 安全性：API 的 SourceItem 本身即精选过的公开契约（**不含 chunk 正文 content**，
+    # 正文只进 LLM 上下文）；本系统按 ADR-0001 是"数据分区、非安全边界"，响应字段不
+    # 承担权限职责。真要拦某字段，在这里显式 pop 并写明理由，而不是退回白名单。
     sources = []
     for s in result.get("sources", []):
-        sources.append({
-            "title": s.get("title"),
-            "doc_id": s.get("doc_id"),
-            "score": s.get("score"),
-            "engine": s.get("engine"),
-            "confidence": s.get("confidence"),
-            "confidence_basis": s.get("confidence_basis"),
-            "source_path": s.get("source_path"),
-            "doc_type": s.get("doc_type"),
-            # images：该 chunk 关联的图片 URL 列表（§4.3），空数组=无图，直接透传。
-            "images": s.get("images") or [],
-            "snippet": truncate(s.get("snippet")),
-        })
+        item = dict(s)
+        item["snippet"] = truncate(s.get("snippet"))
+        item.setdefault("images", [])
+        sources.append(item)
 
     ok_result = {
         "status": "ok",

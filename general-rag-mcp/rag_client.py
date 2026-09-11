@@ -83,13 +83,22 @@ class RagClient:
         tags: list[str] | None = None,
         categories: list[str] | None = None,
         use_graph: bool = True,
+        include_deprecated: bool = True,
     ) -> dict:
-        """POST /search — 检索问答（核心）。namespace 总是显式传。"""
+        """POST /search — 检索问答（核心）。namespace 总是显式传。
+
+        include_deprecated=True（后端默认）：已下架文档照常返回、不降权，只在
+        source.status 里标记，由调用方判断。传 False 才隐藏——这是**显式选择
+        退出**，不是默认（理由见 general-rag 的 search_fulltext docstring）。
+        总是下发该字段是刻意的：让"要不要下架内容"成为调用方看得见的显式决定，
+        而不是依赖两侧默认值恰好一致。
+        """
         payload: dict[str, Any] = {
             "query": query,
             "namespace": namespace,
             "top_k": top_k,
             "use_graph": use_graph,
+            "include_deprecated": include_deprecated,
         }
         # NOTE: 仅在有值时下发可选过滤字段，避免空值被后端误解为过滤条件。
         if doc_type:

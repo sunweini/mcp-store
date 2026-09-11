@@ -707,3 +707,99 @@ async def test_delete_document_never_retries(mock_rag):
         await mock_rag.delete_document(namespace="stamp-project", doc_id="a.md")
 
     assert mock_rag._responses == []
+
+
+# ── 来源字段透传（结构性守卫，2026-09-11）───────────────────────────────────
+#
+# 这里原先逐个挑选要返回的 source 字段（白名单），于是后端每加一个字段都得记得
+# 同步改 MCP，忘了就**静默丢**。实际漏了三轮：metadata（tags/categories）、
+# generated_by / updated_at、status / chunk_path —— 后端全在返回，agent 全看不到。
+#
+# 修复 = 改成透传（只截断 snippet）。下面第一条测试用"给什么出什么"钉住结构，
+# 这样**后端将来加任何字段都自动通过**，不需要有人记得改这里；真要是有人退回
+# 白名单，它会立刻红。
+
+
+async def test_search_passes_through_all_source_fields(fake_client):
+    """给什么字段就出什么字段——白名单式的挑选会让这条测试失败。
+
+    刻意用一个后端现在**还不存在**的字段名：透传的实现能过，白名单的实现在
+    这个字段上必然丢，于是测试红。这正是我们要的守卫方向。
+    """
+    backend_source = {
+        "title": "T",
+        "doc_id": "dev/a.md",
+        "score": 0.9,
+        "engine": "es",
+        "confidence": "★★★",
+        "confidence_basis": "rerank",
+        "source_path": "direct",
+        "doc_type": "reference",
+        "chunk_type": "section",
+        "snippet": "片段",
+        # 未来后端可能加的任何字段——透传实现必须原样带出
+        "some_field_invented_later": "值",
+    }
+    fake_client.search_result = {"answer": "a", "sources": [backend_source],
+                                 "query": "q", "namespace": "dev"}
+
+    result = await knowledge_base_search(query="q", namespace="dev",
+                                         client=fake_client)
+    src = result.structured_content["sources"][0]
+
+    missing = set(backend_source) - set(src)
+    assert not missing, (
+        f"这些来源字段被 MCP 丢掉了：{sorted(missing)}。"
+        "透传实现不该丢任何字段——若有人退回白名单，这里会红。"
+    )
+    assert src["some_field_invented_later"] == "值"
+
+
+async def test_search_exposes_trust_and_lifecycle_fields(fake_client):
+    """点名钉住三轮工作产出的字段确实到达 agent（回归到具体能力）。
+
+    上面那条守结构，这条守**具体语义**：这几轮加的 status/generated_by/
+    updated_at/chunk_path/metadata 必须真的能被 agent 读到，否则那些工作等于白做。
+    """
+    fake_client.search_result = {
+        "answer": "a",
+        "sources": [{
+            "title": "T", "doc_id": "dev/a.md", "snippet": "片段",
+            "metadata": {"tags": ["插件"], "categories": ["金蝶"]},
+            "generated_by": "process:ingest",
+            "updated_at": "2026-09-11T00:00:00Z",
+            "status": "deprecated",
+            "chunk_path": "手册 > 4.1 坑清单",
+        }],
+        "query": "q", "namespace": "dev",
+    }
+    result = await knowledge_base_search(query="q", namespace="dev",
+                                         client=fake_client)
+    src = result.structured_content["sources"][0]
+
+    assert src["metadata"]["tags"] == ["插件"], "tags 丢了 → agent 看不到标签"
+    assert src["generated_by"] == "process:ingest", "署名丢了 → 分不清人写还是机器转"
+    assert src["updated_at"] == "2026-09-11T00:00:00Z"
+    assert src["status"] == "deprecated", "status 丢了 → 已下架内容会被当现行规范"
+    assert src["chunk_path"] == "手册 > 4.1 坑清单"
+
+
+async def test_search_truncates_snippet_but_keeps_rest(fake_client):
+    """透传不意味着不处理：snippet 仍要截断（隐私），其余原样。"""
+    from rag_client import SNIPPET_LIMIT
+
+    fake_client.search_result = {
+        "answer": "a",
+        "sources": [{
+            "title": "T", "doc_id": "dev/a.md",
+            "snippet": "长" * (SNIPPET_LIMIT + 500),
+            "status": "stable",
+        }],
+        "query": "q", "namespace": "dev",
+    }
+    result = await knowledge_base_search(query="q", namespace="dev",
+                                         client=fake_client)
+    src = result.structured_content["sources"][0]
+
+    assert len(src["snippet"]) <= SNIPPET_LIMIT + 1, "snippet 必须截断（隐私）"
+    assert src["status"] == "stable", "截断 snippet 不该顺手丢别的字段"

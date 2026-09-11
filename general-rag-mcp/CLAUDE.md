@@ -6,6 +6,8 @@ general-rag 知识库检索的 MCP server：让任意 agent 通过 MCP 检索
 general-rag 知识库（章管家接口文档等），返回带来源标记的答案。
 对接契约见 `/Users/sunweini/同步空间/工作内容/AI工作项目/general-rag/docs/mcp-integration-guide.md`。
 
+8 个工具：四个读（search / namespaces / health / golden_suggest）+ 四个写（ingest / ingest_file / golden_add / delete_document）。
+
 ## 架构
 
 ```
@@ -85,6 +87,10 @@ uv sync --all-extras
 uv run python server.py
 uv run python -m pytest tests/ -q
 ```
+
+## 已知注意事项（续）
+
+本仓库已建 CodeGraph 索引（`.codegraph/`，守护进程自动同步）：跨文件调用链/影响面分析用 `codegraph query|node|explore`（CLI 需 node 在 PATH：`export PATH="/opt/homebrew/Cellar/node@22/22.22.2/bin:/opt/homebrew/bin:$PATH"`）。
 
 ## 已知注意事项
 
