@@ -12,6 +12,8 @@ ZABBIX_MCP_URL="${ZABBIX_MCP_URL:-http://zabbix-mcp:9053/mcp}"
 SEARCH_MCPS="tavily-mcp:9050 brave-mcp:9051 serpapi-mcp:9052"
 # 阿里云 DNS MCP:账户 AccessKey 无 env,由 admin UI「阿里云 DNS」页写入 Redis
 ALIYUN_MCP_URL="${ALIYUN_MCP_URL:-http://aliyun-dns-mcp:9054/mcp}"
+# general-rag MCP:后端地址由 compose 的 GENERAL_RAG_BASE_URL 注入,注册只需容器名+端口
+GENERAL_RAG_MCP_URL="${GENERAL_RAG_MCP_URL:-http://general-rag-mcp:9055/mcp}"
 TOKEN_NAME="${TOKEN_NAME:-gateway-full}"
 
 echo "=== 登录 admin ==="
@@ -69,6 +71,21 @@ else
   echo "  已注册 aliyun-dns-mcp -> $ALIYUN_MCP_URL"
 fi
 
+echo "=== 注册 general-rag-mcp(若不存在)==="
+# 后端地址由 compose 的 GENERAL_RAG_BASE_URL 注入容器,注册只需容器名+端口;
+# 该 MCP 无鉴权、无 key 池、无共享状态(不依赖 Redis),故注册后无需额外配置步骤
+EXISTING=$(curl -s -m5 "$ADMIN_HOST/api/servers" -H "Authorization: Bearer $TOK" \
+  | python3 -c "import sys,json; print(any(s['name']=='general-rag-mcp' for s in json.load(sys.stdin)))" 2>/dev/null || echo "False")
+if [ "$EXISTING" = "True" ]; then
+  echo "  general-rag-mcp 已注册,跳过"
+else
+  curl -s -m10 -X POST "$ADMIN_HOST/api/servers" \
+    -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+    -d "{\"name\":\"general-rag-mcp\",\"url\":\"$GENERAL_RAG_MCP_URL\",\"description\":\"General RAG knowledge base: search, namespaces, health, golden cases, ingest, delete\"}" \
+    > /dev/null
+  echo "  已注册 general-rag-mcp -> $GENERAL_RAG_MCP_URL"
+fi
+
 echo "=== 刷新工具列表 ==="
 curl -s -m15 -X POST "$ADMIN_HOST/api/servers/zabbix-mcp/refresh-tools" \
   -H "Authorization: Bearer $TOK" \
@@ -82,6 +99,9 @@ done
 curl -s -m15 -X POST "$ADMIN_HOST/api/servers/aliyun-dns-mcp/refresh-tools" \
   -H "Authorization: Bearer $TOK" \
   | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  aliyun-dns-mcp tools: %d 个" % len(d.get("tools",[])))'
+curl -s -m15 -X POST "$ADMIN_HOST/api/servers/general-rag-mcp/refresh-tools" \
+  -H "Authorization: Bearer $TOK" \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  general-rag-mcp tools: %d 个" % len(d.get("tools",[])))'
 
 echo "=== 创建 API token(read+write)==="
 # 幂等:列出已有 token,同名跳过
@@ -93,7 +113,7 @@ else
   # 权限覆盖全部已注册 server;tokens API 校验引用的 server 必须已注册,故在注册之后创建
   curl -s -m10 -X POST "$ADMIN_HOST/api/tokens" \
     -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
-    -d "{\"name\":\"$TOKEN_NAME\",\"permissions\":{\"zabbix-mcp\":{\"read\":true,\"write\":true},\"tavily-mcp\":{\"read\":true,\"write\":true},\"brave-mcp\":{\"read\":true,\"write\":true},\"serpapi-mcp\":{\"read\":true,\"write\":true},\"aliyun-dns-mcp\":{\"read\":true,\"write\":true}}}" \
+    -d "{\"name\":\"$TOKEN_NAME\",\"permissions\":{\"zabbix-mcp\":{\"read\":true,\"write\":true},\"tavily-mcp\":{\"read\":true,\"write\":true},\"brave-mcp\":{\"read\":true,\"write\":true},\"serpapi-mcp\":{\"read\":true,\"write\":true},\"aliyun-dns-mcp\":{\"read\":true,\"write\":true},\"general-rag-mcp\":{\"read\":true,\"write\":true}}}" \
     | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  明文 token(只显示一次): %s" % d.get("token","?"))'
 fi
 

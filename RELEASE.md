@@ -2,6 +2,49 @@
 
 本仓库版本更新记录。每个里程碑记录：变更内容、影响范围、升级/部署注意事项、回滚方式。
 
+## v1.4.3 — general-rag-mcp 字段透传修复 + 工具 schema 漂移修复 + CI（2026-09-11）
+
+**目标**：修掉 general-rag-mcp 两处「静默丢东西」的缺陷——agent 拿不到后端已返回的来源字段、以及工具 schema 里少参数；并把防漂移的守卫测试接进 CI，让这类 bug 不能靠"记得跑测试"来兜。
+
+### 变更内容
+
+| 变更 | 说明 |
+|---|---|
+| `search` 来源字段整体透传 | 原先逐个挑选字段的白名单改为 `dict(s)` 整体透传（只截断 `snippet`）。白名单是"默认丢弃、显式放行"，方向本身就错：后端加字段就静默丢，实际已漏三轮（`metadata`、`generated_by`/`updated_at`、`status`/`chunk_path`）。改后后端加字段自动到达 agent |
+| `include_deprecated` 参数 | `knowledge_base_search` + `RagClient.search` + `_mcp_search` 三处贯通，默认 `True`（已下架文档照常返回、只在 `status` 标记，不降权） |
+| `register()` 适配函数补参 | `_mcp_search` 漏了 `include_deprecated`：函数支持、工具 inputSchema 里没有（本仓库"两份手写清单漂移"第四处）。已补并加测试钉住 |
+| 渲染图按 URL 去重 | 见 v1.4.2，随本版一并交付 |
+| GitHub Actions CI | 新增 `.github/workflows/general-rag-mcp.yml`，push/PR 跑 52 用例；路径限定 `general-rag-mcp/**`。用 uv + 精确钉 action 版本（`setup-uv` 无浮动大版本 tag） |
+| `deploy/init.sh` 补注册 | 新增 general-rag-mcp 自动注册 + 刷新工具 + token 权限。**此前全新部署会漏掉这个 MCP**（Redis 无数据时只能手工在管理界面补） |
+
+### 影响范围
+
+- general-rag-mcp：`tools/knowledge_base.py`、`rag_client.py`、测试 48→52。
+- `deploy/init.sh`：新增一段注册逻辑，幂等（已注册则跳过）；对已部署环境无副作用。
+- gateway-proxy / gateway-admin / 后端 general-rag：**均不动**。
+
+### 部署注意事项
+
+1. 重建 general-rag-mcp 容器：`docker compose build general-rag-mcp && docker compose up -d general-rag-mcp`。
+2. 已部署环境若缺 general-rag-mcp 注册，重跑 `bash deploy/init.sh` 即可补齐（幂等）。
+3. `include_deprecated` 需要后端 `SearchRequest` 支持该字段（已核对生产 `/openapi.json`：存在）。
+
+### 回滚
+
+```bash
+docker compose rm -sf general-rag-mcp
+# 或 git 回退 general-rag-mcp/ 与 deploy/init.sh 后重建
+```
+
+### 验证证据
+
+- 52 用例全绿；AST 逐参数比对 8 个 `_mcp_*` 适配函数与真实函数签名，**零漂移**。
+- 真实 MCP 协议 `tools/list` 实测：8 tools，`knowledge_base_search` 的 inputSchema 含 `include_deprecated`，`readOnlyHint=true`。
+- 生产后端（10.33.17.72:8001）真实 `search`：`status=ok`、`degraded=false`、5 条来源，来源字段后端 18 个 → 工具层 **18 个（零丢失）**，`snippet` 截断生效。
+- CI action 版本经 GitHub API 查证存在（`checkout@v7`、`setup-uv@v10.1.0`、`setup-python@v7`）。
+
+---
+
 ## v1.4.2 — general-rag-mcp search 渲染图按 URL 去重（2026-09-09）
 
 **目标**：`knowledge_base_search` 渲染图片时按完整 URL 去重——`source.images` 是文档级（整篇文档的图挂到每个 chunk），多 chunk 命中时同 URL 在 `sources[]` 重复，导致同图重复渲染。

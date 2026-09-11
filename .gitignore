@@ -1,3 +1,6 @@
 dump.rdb
 .claude/
 .mnemon/
+# codegraph 索引为本地生成物，各 MCP 子目录各自 init，不提交
+.codegraph/
+.DS_Store
