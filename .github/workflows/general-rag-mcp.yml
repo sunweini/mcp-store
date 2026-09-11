@@ -33,9 +33,13 @@ jobs:
       run:
         working-directory: general-rag-mcp
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: astral-sh/setup-uv@v5
+      # ⚠️ setup-uv **必须写精确版本**，不能写 @v10：它不维护浮动大版本 tag
+      # （只有 v10.0.0 / v10.1.0 这种精确 tag，`git/ref/tags/v10` 返回 404）。
+      # 2026-09-11 经 GitHub API 查证；顺手把 checkout/setup-python 升到 v7
+      # 以消除 Node 20 弃用告警。升级 action 版本时同样先查 tag 再写。
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
 
