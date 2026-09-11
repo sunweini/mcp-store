@@ -1,5 +1,19 @@
 # 实现任务书：golden 生长工具 + 删除工具（agent 可读，自包含）
 
+> ## ✅ 已完成（2026-09-11 核实）
+>
+> **本任务书的三件套已全部实现并上线**：`knowledge_base_golden_suggest` /
+> `knowledge_base_golden_add` / `knowledge_base_delete_document`。
+> 本项目现有 **8 个工具**（search / namespaces / health / ingest / ingest_file /
+> golden_suggest / golden_add / delete_document），已推 `mcp-store` 远端。
+>
+> **这份文档保留作历史记录，不要再照着它动手。** 下文"现有 5 个工具""从未实现"
+> 等表述描述的是**任务开始前**的状态，已不再成立。
+>
+> ⚠️ 之所以加这段横幅：一份已完成的任务书若保持"待做"的措辞，会误导接手的 agent
+> **重做已完成的工作**。判断某能力是否落地，看工具清单或跑 `pytest`，
+> **不要看文档里的状态措辞**。
+
 > 给接手 agent 的完整说明。你不需要任何对话上下文——后端 API 契约已内联，代码模式请看本项目的
 > `tools/knowledge_base.py`（现有 5 个工具的注册写法）与 `rag_client.py`（REST 封装）。动手前先读这两个文件。
 
